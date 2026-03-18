@@ -92,15 +92,11 @@ Go to [Credentials](https://console.cloud.google.com/apis/credentials):
 
 ### 5. Configure OAuth credentials
 
-Set environment variables so the extension can find your OAuth credentials:
-
 ```bash
-# Add to your shell profile (~/.zshrc, ~/.bashrc, etc.)
-export GWS_OAUTH_CLIENT_ID="YOUR_CLIENT_ID.apps.googleusercontent.com"
-export GWS_OAUTH_CLIENT_SECRET="YOUR_CLIENT_SECRET"
+cp .env.example .env
 ```
 
-Restart your terminal (or `source ~/.zshrc`) so Claude Desktop picks up the variables.
+Open `.env` and fill in your Client ID and Client Secret from the previous step.
 
 ### 6. Build the extension
 
