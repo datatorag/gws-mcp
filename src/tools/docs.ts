@@ -5,13 +5,19 @@ export const docsTools = [
   {
     name: "docs_get",
     description:
-      "Get the content of a Google Doc by its document ID. Returns the document structure and text content.",
+      'Get the content of a Google Doc. Three modes: "text" (default) returns plain text — use for reading/summarizing. "index" returns text with startIndex/endIndex — use before positional edits (insertText at index, deleteContentRange). "full" returns the raw API response — use only for debugging or style operations.',
     inputSchema: {
       type: "object" as const,
       properties: {
         document_id: {
           type: "string",
           description: "The Google Docs document ID (from the URL)",
+        },
+        mode: {
+          type: "string",
+          enum: ["text", "index", "full"],
+          description:
+            '"text" (default): plain text. "index": text with character positions for edits. "full": raw API response.',
         },
       },
       required: ["document_id"],
@@ -20,8 +26,7 @@ export const docsTools = [
   },
   {
     name: "docs_write",
-    description:
-      "Write/append text content to a Google Doc.",
+    description: "Write/append text content to a Google Doc.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -52,7 +57,7 @@ export const docsTools = [
         requests: {
           type: "array",
           description:
-            "Array of update request objects. Each can be: insertText ({ insertText: { location: { index: 1 }, text: \"Hello\" } }), replaceAllText ({ replaceAllText: { containsText: { text: \"old\", matchCase: true }, replaceText: \"new\" } }), deleteContentRange ({ deleteContentRange: { range: { startIndex: 1, endIndex: 10 } } })",
+            'Array of update request objects. Each can be: insertText ({ insertText: { location: { index: 1 }, text: "Hello" } }), replaceAllText ({ replaceAllText: { containsText: { text: "old", matchCase: true }, replaceText: "new" } }), deleteContentRange ({ deleteContentRange: { range: { startIndex: 1, endIndex: 10 } } })',
           items: { type: "object" },
         },
       },
@@ -93,6 +98,65 @@ export const docsTools = [
   },
 ];
 
+interface DocElement {
+  startIndex?: number;
+  endIndex?: number;
+  paragraph?: {
+    elements?: Array<{
+      startIndex?: number;
+      endIndex?: number;
+      textRun?: { content?: string };
+    }>;
+  };
+}
+
+function extractText(data: Record<string, unknown>): {
+  documentId: unknown;
+  title: unknown;
+  text: string;
+} {
+  const body = data.body as { content?: DocElement[] } | undefined;
+  const elements = body?.content || [];
+  const parts: string[] = [];
+  for (const el of elements) {
+    if (el.paragraph?.elements) {
+      for (const run of el.paragraph.elements) {
+        if (run.textRun?.content) parts.push(run.textRun.content);
+      }
+    }
+  }
+  return {
+    documentId: data.documentId,
+    title: data.title,
+    text: parts.join(""),
+  };
+}
+
+function extractIndexed(data: Record<string, unknown>): {
+  documentId: unknown;
+  title: unknown;
+  content: Array<{ startIndex: number; endIndex: number; text: string }>;
+} {
+  const body = data.body as { content?: DocElement[] } | undefined;
+  const elements = body?.content || [];
+  const content: Array<{ startIndex: number; endIndex: number; text: string }> =
+    [];
+  for (const el of elements) {
+    if (el.paragraph?.elements) {
+      for (const run of el.paragraph.elements) {
+        if (run.textRun?.content) {
+          content.push({
+            startIndex: run.startIndex ?? 0,
+            endIndex: run.endIndex ?? 0,
+            text: run.textRun.content,
+          });
+        }
+      }
+    }
+  }
+  return { documentId: data.documentId, title: data.title, content };
+}
+
 export async function handleDocs(
   client: GwsClient,
   toolName: string,
@@ -103,15 +167,22 @@ export async function handleDocs(
       const result = await client.api("docs", "documents", "get", {
         params: { documentId: args.document_id },
       });
-      return jsonResponse(result.data);
+      const mode = (args.mode as string) || "text";
+      const data = result.data as Record<string, unknown>;
+      if (mode === "text") return jsonResponse(extractText(data));
+      if (mode === "index") return jsonResponse(extractIndexed(data));
+      return jsonResponse(data);
     }
 
     case "docs_write": {
-      const flags: Record<string, string> = {
-        "document-id": args.document_id as string,
-        text: args.text as string,
-      };
-      const result = await client.helper("docs", "write", flags);
+      const result = await client.api("docs", "documents", "batchUpdate", {
+        params: { documentId: args.document_id },
+        jsonBody: {
+          requests: [
+            { insertText: { location: { index: 1 }, text: args.text } },
+          ],
+        },
+      });
       return jsonResponse(result.data);
     }
 
@@ -119,7 +190,8 @@ export async function handleDocs(
       const result = await client.api("docs", "documents", "create", {
         jsonBody: { title: args.title },
       });
-      return jsonResponse(result.data);
+      const d = result.data as Record<string, unknown>;
+      return jsonResponse({ documentId: d.documentId, title: d.title });
     }
 
     case "docs_batch_update": {
@@ -132,7 +204,7 @@ export async function handleDocs(
 
     case "docs_delete": {
       const result = await client.api("drive", "files", "delete", {
-        params: { fileId: args.document_id },
+        params: { fileId: args.document_id, supportsAllDrives: true },
       });
       return deleteResponse(result, "Document");
     }

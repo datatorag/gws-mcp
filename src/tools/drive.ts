@@ -1,5 +1,8 @@
 import type { GwsClient } from "../gws-client.js";
 import { jsonResponse } from "./response.js";
+import { handleDocs } from "./docs.js";
+import { handleSheets } from "./sheets.js";
+import { handleSlides } from "./slides.js";
 
 export const driveTools = [
   {
@@ -24,85 +27,27 @@ export const driveTools = [
     annotations: { destructiveHint: false, readOnlyHint: true },
   },
   {
-    name: "drive_upload",
-    description: "Upload a file to Google Drive.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        file_path: {
-          type: "string",
-          description: "Local file path to upload",
-        },
-        name: {
-          type: "string",
-          description: "Name for the file in Drive (defaults to local filename)",
-        },
-      },
-      required: ["file_path"],
-    },
-    annotations: { destructiveHint: true, readOnlyHint: false },
-  },
-  {
-    name: "drive_download",
-    description: "Download a file from Google Drive by its file ID.",
+    name: "drive_read_file",
+    description:
+      "Read the text content of any file in Google Drive by file ID. Supports Google Docs, Sheets, Slides, Office formats (.docx/.xlsx/.pptx — auto-converted), and plain text files. Returns extracted text directly — no local filesystem needed.",
     inputSchema: {
       type: "object" as const,
       properties: {
         file_id: {
           type: "string",
-          description: "The Google Drive file ID to download",
-        },
-        output_path: {
-          type: "string",
-          description: "Local path to save the downloaded file",
+          description: "The Google Drive file ID to read",
         },
       },
       required: ["file_id"],
     },
     annotations: { destructiveHint: false, readOnlyHint: true },
   },
-  {
-    name: "drive_share",
-    description:
-      "Share a Google Drive file or folder with a user or group. Sets permissions for viewing, commenting, or editing.",
-    inputSchema: {
-      type: "object" as const,
-      properties: {
-        file_id: {
-          type: "string",
-          description: "The Google Drive file or folder ID to share",
-        },
-        email: {
-          type: "string",
-          description: "Email address of the user or group to share with",
-        },
-        role: {
-          type: "string",
-          enum: ["reader", "commenter", "writer"],
-          description:
-            "Permission level: \"reader\" (view only), \"commenter\" (can comment), \"writer\" (can edit). Defaults to \"reader\".",
-        },
-        type: {
-          type: "string",
-          enum: ["user", "group", "domain", "anyone"],
-          description:
-            "Type of grantee. Defaults to \"user\". Use \"anyone\" for link sharing.",
-        },
-        send_notification: {
-          type: "boolean",
-          description:
-            "Whether to send an email notification to the recipient (default: true)",
-        },
-        message: {
-          type: "string",
-          description: "Optional message to include in the sharing notification email",
-        },
-      },
-      required: ["file_id", "email", "role"],
-    },
-    annotations: { destructiveHint: true, readOnlyHint: false },
-  },
 ];
+
+const GOOGLE_DOC = "application/vnd.google-apps.document";
+const GOOGLE_SHEET = "application/vnd.google-apps.spreadsheet";
+const GOOGLE_SLIDES = "application/vnd.google-apps.presentation";
+const OFFICE_PREFIX = "application/vnd.openxmlformats-officedocument";
 
 export async function handleDrive(
   client: GwsClient,
@@ -116,49 +61,98 @@ export async function handleDrive(
           q: args.query as string,
           pageSize: (args.page_size as number) || 20,
           fields: "files(id,name,mimeType,modifiedTime,size,webViewLink)",
+          supportsAllDrives: true,
+          includeItemsFromAllDrives: true,
         },
       });
       return jsonResponse(result.data);
     }
 
-    case "drive_upload": {
-      const flags: Record<string, string> = {
-        file: args.file_path as string,
-      };
-      if (args.name) flags.name = args.name as string;
-      const result = await client.helper("drive", "upload", flags);
-      return jsonResponse(result.data);
-    }
+    case "drive_read_file": {
+      const fileId = args.file_id as string;
 
-    case "drive_download": {
-      const flags: Record<string, string> = {
-        "file-id": args.file_id as string,
-      };
-      if (args.output_path) flags.output = args.output_path as string;
-      const result = await client.helper("drive", "download", flags);
-      return jsonResponse(result.data);
-    }
-
-    case "drive_share": {
-      const params: Record<string, unknown> = {
-        fileId: args.file_id,
-        sendNotificationEmail: args.send_notification !== false,
-      };
-      if (args.message) {
-        params.emailMessage = args.message;
-      }
-      const result = await client.api("drive", "permissions", "create", {
-        params,
-        jsonBody: {
-          role: args.role || "reader",
-          type: (args.type as string) || "user",
-          emailAddress: args.email,
-        },
+      // Step 1: Get file metadata
+      const meta = await client.api("drive", "files", "get", {
+        params: { fileId, fields: "id,name,mimeType", supportsAllDrives: true },
       });
-      return jsonResponse(result.data);
+      const file = meta.data as { id: string; name: string; mimeType: string };
+      const { name, mimeType } = file;
+
+      // Step 2: Route by mimeType
+      const content = await readFileContent(client, fileId, name, mimeType);
+      return jsonResponse({ fileId, name, mimeType, content });
     }
 
     default:
       throw new Error(`Unknown Drive tool: ${toolName}`);
   }
+}
+
+async function readFileContent(
+  client: GwsClient,
+  fileId: string,
+  name: string,
+  mimeType: string
+): Promise<unknown> {
+  // Native Google Doc
+  if (mimeType === GOOGLE_DOC) {
+    const result = await handleDocs(client, "docs_get", {
+      document_id: fileId,
+      mode: "text",
+    });
+    const parsed = JSON.parse(result.content[0].text);
+    return parsed.text;
+  }
+
+  // Native Google Sheet
+  if (mimeType === GOOGLE_SHEET) {
+    const result = await handleSheets(client, "sheets_read", {
+      spreadsheet_id: fileId,
+      range: "A1:Z1000",
+    });
+    const parsed = JSON.parse(result.content[0].text);
+    return parsed.values;
+  }
+
+  // Native Google Slides
+  if (mimeType === GOOGLE_SLIDES) {
+    const result = await handleSlides(client, "slides_get", {
+      presentation_id: fileId,
+    });
+    const parsed = JSON.parse(result.content[0].text);
+    return parsed.slides;
+  }
+
+  // Office formats → copy-convert to native, read, delete copy
+  if (mimeType.startsWith(OFFICE_PREFIX)) {
+    let copy: { id: string; mimeType: string } | undefined;
+    try {
+      const copyResult = await client.api("drive", "files", "copy", {
+        params: { fileId, supportsAllDrives: true },
+        jsonBody: { name: `${name} [MCP temp]`, mimeType: mimeType.includes("wordprocessing") ? GOOGLE_DOC : mimeType.includes("spreadsheet") ? GOOGLE_SHEET : GOOGLE_SLIDES },
+      });
+      copy = copyResult.data as { id: string; mimeType: string };
+      return await readFileContent(client, copy.id, name, copy.mimeType);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { error: `Failed to read Office file: ${msg}` };
+    } finally {
+      if (copy?.id) {
+        await client.api("drive", "files", "delete", {
+          params: { fileId: copy.id, supportsAllDrives: true },
+        }).catch(() => {});
+      }
+    }
+  }
+
+  // Plain text / CSV (explicit types only)
+  if (mimeType === "text/plain" || mimeType === "text/csv") {
+    const result = await client.api("drive", "files", "get", {
+      params: { fileId, alt: "media", supportsAllDrives: true },
+    });
+    return result.data;
+  }
+
+  // Everything else is unsupported
+  return { error: `Unsupported file type: ${mimeType}` };
 }

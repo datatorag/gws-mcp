@@ -5,7 +5,7 @@ export const slidesTools = [
   {
     name: "slides_get",
     description:
-      "Get the content of a Google Slides presentation by its ID. Returns slides, layouts, and text content.",
+      "Get the content of a Google Slides presentation. Returns slide objectIds, placeholder types (TITLE/BODY/SUBTITLE), and text content — stripped of layout/styling data to fit context windows. Use the returned objectIds with slides_batch_update for edits.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -20,7 +20,8 @@ export const slidesTools = [
   },
   {
     name: "slides_create",
-    description: "Create a new Google Slides presentation.",
+    description:
+      "Create a new Google Slides presentation. Returns the presentationId and a placeholder_map for each slide mapping placeholder types (TITLE, BODY, SUBTITLE) to their objectIds — use these with slides_batch_update insertText.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -73,6 +74,62 @@ export const slidesTools = [
   },
 ];
 
+interface SlideElement {
+  objectId?: string;
+  shape?: {
+    placeholder?: { type?: string };
+    text?: {
+      textElements?: Array<{
+        textRun?: { content?: string };
+      }>;
+    };
+  };
+}
+
+interface SlideData {
+  objectId?: string;
+  pageElements?: SlideElement[];
+}
+
+function trimPresentation(data: Record<string, unknown>) {
+  const slides = (data.slides as SlideData[]) || [];
+  return {
+    presentationId: data.presentationId,
+    title: data.title,
+    slides: slides.map((slide) => {
+      const elements = (slide.pageElements || [])
+        .filter((el) => el.shape?.placeholder || el.shape?.text?.textElements?.length)
+        .map((el) => {
+          const textElements = el.shape?.text?.textElements || [];
+          const text = textElements
+            .map((te) => te.textRun?.content || "")
+            .join("");
+          const result: { objectId?: string; placeholderType?: string; text?: string } = {
+            objectId: el.objectId,
+          };
+          if (el.shape?.placeholder?.type) {
+            result.placeholderType = el.shape.placeholder.type;
+          }
+          result.text = text || undefined;
+          return result;
+        });
+
+      const placeholderMap: Record<string, string> = {};
+      for (const el of elements) {
+        if (el.placeholderType && el.objectId) {
+          placeholderMap[el.placeholderType] = el.objectId;
+        }
+      }
+
+      return {
+        objectId: slide.objectId,
+        placeholder_map: placeholderMap,
+        elements,
+      };
+    }),
+  };
+}
+
 export async function handleSlides(
   client: GwsClient,
   toolName: string,
@@ -83,14 +140,14 @@ export async function handleSlides(
       const result = await client.api("slides", "presentations", "get", {
         params: { presentationId: args.presentation_id },
       });
-      return jsonResponse(result.data);
+      return jsonResponse(trimPresentation(result.data as Record<string, unknown>));
     }
 
     case "slides_create": {
       const result = await client.api("slides", "presentations", "create", {
         jsonBody: { title: args.title },
       });
-      return jsonResponse(result.data);
+      return jsonResponse(trimPresentation(result.data as Record<string, unknown>));
     }
 
     case "slides_batch_update": {
@@ -108,7 +165,7 @@ export async function handleSlides(
 
     case "slides_delete": {
       const result = await client.api("drive", "files", "delete", {
-        params: { fileId: args.presentation_id },
+        params: { fileId: args.presentation_id, supportsAllDrives: true },
       });
       return deleteResponse(result, "Presentation");
     }

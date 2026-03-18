@@ -128,12 +128,31 @@ export async function handleSheets(
 ) {
   switch (toolName) {
     case "sheets_read": {
-      const flags: Record<string, string> = {
-        spreadsheet: args.spreadsheet_id as string,
-        range: args.range as string,
-      };
-      const result = await client.helper("sheets", "read", flags);
-      return jsonResponse(result.data);
+      const result = await client.api(
+        "sheets",
+        "spreadsheets.values",
+        "get",
+        {
+          params: {
+            spreadsheetId: args.spreadsheet_id,
+            range: args.range,
+          },
+        }
+      );
+      const data = result.data as Record<string, unknown>;
+      const values = (data.values as string[][] | undefined) || [];
+      const columnCount = values.reduce((max, row) => Math.max(max, row.length), 0);
+      const normalized = values.map((row) =>
+        row.length < columnCount
+          ? [...row, ...Array(columnCount - row.length).fill("")]
+          : row
+      );
+      return jsonResponse({
+        range: data.range,
+        rowCount: normalized.length,
+        columnCount,
+        values: normalized,
+      });
     }
 
     case "sheets_update": {
@@ -156,11 +175,23 @@ export async function handleSheets(
     }
 
     case "sheets_append": {
-      const flags: Record<string, string> = {
-        spreadsheet: args.spreadsheet_id as string,
-        "json-values": JSON.stringify(args.values),
-      };
-      const result = await client.helper("sheets", "append", flags);
+      const range = (args.range as string) || "Sheet1!A1";
+      const result = await client.api(
+        "sheets",
+        "spreadsheets.values",
+        "append",
+        {
+          params: {
+            spreadsheetId: args.spreadsheet_id,
+            range,
+            valueInputOption: "USER_ENTERED",
+            insertDataOption: "INSERT_ROWS",
+          },
+          jsonBody: {
+            values: args.values,
+          },
+        }
+      );
       return jsonResponse(result.data);
     }
 
@@ -183,12 +214,17 @@ export async function handleSheets(
       const result = await client.api("sheets", "spreadsheets", "create", {
         jsonBody: body,
       });
-      return jsonResponse(result.data);
+      const d = result.data as Record<string, unknown>;
+      return jsonResponse({
+        spreadsheetId: d.spreadsheetId,
+        title: (d.properties as Record<string, unknown>)?.title,
+        spreadsheetUrl: d.spreadsheetUrl,
+      });
     }
 
     case "sheets_delete": {
       const result = await client.api("drive", "files", "delete", {
-        params: { fileId: args.spreadsheet_id },
+        params: { fileId: args.spreadsheet_id, supportsAllDrives: true },
       });
       return deleteResponse(result, "Spreadsheet");
     }
