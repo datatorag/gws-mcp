@@ -15,7 +15,7 @@ if [ -z "${GWS_OAUTH_CLIENT_ID:-}" ] || [ -z "${GWS_OAUTH_CLIENT_SECRET:-}" ]; t
 fi
 
 # Build TypeScript
-tsc
+npx tsc
 
 # Write OAuth credentials into bundle
 cat > server/oauth.json <<EOF

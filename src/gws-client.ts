@@ -105,7 +105,7 @@ export class GwsClient {
         message?: string;
       };
 
-      if (error.code === 2 || error.stderr?.includes("auth")) {
+      if (error.code === 2) {
         throw new Error(
           "Google Workspace authentication required. Use the gws_auth_setup tool to authenticate."
         );

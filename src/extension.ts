@@ -1,11 +1,21 @@
-import { exec } from "node:child_process";
+import { spawn } from "node:child_process";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createMcpServer, gwsClient } from "./create-server.js";
 
+// Global error handlers to prevent silent crashes
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught exception:", err);
+});
+process.on("unhandledRejection", (err) => {
+  console.error("Unhandled rejection:", err);
+});
+
 // Start MCP server immediately so Claude Desktop doesn't time out
+console.error("Starting Google Workspace MCP server...");
 const server = createMcpServer();
 const transport = new StdioServerTransport();
 await server.connect(transport);
+console.error("MCP server connected via stdio.");
 
 // Then check auth in background and open browser if needed
 gwsClient.authStatus().then((status) => {
@@ -21,8 +31,10 @@ gwsClient.authStatus().then((status) => {
       if (match) {
         stderrBuf = "";
         const openCmd = process.platform === "win32" ? "start" : "open";
-        exec(`${openCmd} "${match[1]}"`);
+        spawn(openCmd, [match[1]], { stdio: "ignore", shell: process.platform === "win32" });
       }
     });
   }
+}).catch((err) => {
+  console.error("Auth status check failed:", err);
 });
