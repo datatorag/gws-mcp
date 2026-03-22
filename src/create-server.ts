@@ -8,7 +8,8 @@ import { allTools, toolHandlers } from "./tools/index.js";
 
 export const gwsClient = new GwsClient();
 
-export function createMcpServer(): Server {
+export function createMcpServer(client?: GwsClient): Server {
+  const activeClient = client ?? gwsClient;
   const server = new Server(
     { name: "google-workspace", version: "1.0.0" },
     { capabilities: { tools: {} } }
@@ -29,7 +30,7 @@ export function createMcpServer(): Server {
           isError: true,
         };
       }
-      return await handler(gwsClient, name, args as Record<string, unknown>);
+      return await handler(activeClient, name, args as Record<string, unknown>);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return {

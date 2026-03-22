@@ -10,6 +10,7 @@ mkdir -p "$BIN_DIR"
 TARGETS=(
   "gws-aarch64-apple-darwin"
   "gws-x86_64-apple-darwin"
+  "gws-x86_64-unknown-linux-gnu"
   "gws-x86_64-pc-windows-msvc"
 )
 
@@ -34,7 +35,7 @@ for TARGET in "${TARGETS[@]}"; do
 done
 
 # Set executable permissions on macOS/Linux binaries
-chmod +x "$BIN_DIR/gws-aarch64-apple-darwin/gws" "$BIN_DIR/gws-x86_64-apple-darwin/gws" 2>/dev/null || true
+chmod +x "$BIN_DIR/gws-aarch64-apple-darwin/gws" "$BIN_DIR/gws-x86_64-apple-darwin/gws" "$BIN_DIR/gws-x86_64-unknown-linux-gnu/gws" 2>/dev/null || true
 
 echo "Done. Binaries in ${BIN_DIR}:"
 ls -la "$BIN_DIR"

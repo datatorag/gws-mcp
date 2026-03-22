@@ -2,12 +2,18 @@ import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createMcpServer } from "./create-server.js";
+import { GwsClient } from "./gws-client.js";
 
 const PORT = parseInt(process.env.PORT || "39147", 10);
 
 const transports = new Map<string, StreamableHTTPServerTransport>();
 
 const httpServer = createServer(async (req, res) => {
+  if (req.url === "/health") {
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ status: "ok" }));
+    return;
+  }
+
   if (req.url !== "/mcp") {
     res.writeHead(404).end("Not found");
     return;
@@ -37,7 +43,10 @@ const httpServer = createServer(async (req, res) => {
     }
   };
 
-  const server = createMcpServer();
+  // If X-User-Token is provided, create a per-session client with that access token
+  const userToken = req.headers["x-user-token"] as string | undefined;
+  const client = userToken ? new GwsClient({ accessToken: userToken }) : undefined;
+  const server = createMcpServer(client);
   await server.connect(transport);
   await transport.handleRequest(req, res);
 });

@@ -32,17 +32,20 @@ function getGwsBinaryPath(): string {
     return path.join(binDir, "gws-aarch64-apple-darwin", "gws");
   if (platform === "darwin" && arch === "x64")
     return path.join(binDir, "gws-x86_64-apple-darwin", "gws");
+  if (platform === "linux" && arch === "x64")
+    return path.join(binDir, "gws-x86_64-unknown-linux-gnu", "gws");
   if (platform === "win32" && arch === "x64")
     return path.join(binDir, "gws.exe");
 
   throw new Error(
-    `Unsupported platform: ${platform}/${arch}. Supported: macOS (arm64, x64), Windows (x64).`
+    `Unsupported platform: ${platform}/${arch}. Supported: macOS (arm64, x64), Linux (x64), Windows (x64).`
   );
 }
 
 export interface GwsClientOptions {
   clientId?: string;
   clientSecret?: string;
+  accessToken?: string;
 }
 
 export class GwsClient {
@@ -55,6 +58,7 @@ export class GwsClient {
     const bundled = loadBundledOAuth();
     const clientId = options?.clientId || process.env.GWS_OAUTH_CLIENT_ID || bundled.clientId;
     const clientSecret = options?.clientSecret || process.env.GWS_OAUTH_CLIENT_SECRET || bundled.clientSecret;
+    if (options?.accessToken) env.GOOGLE_WORKSPACE_CLI_TOKEN = options.accessToken;
     if (clientId) env.GOOGLE_WORKSPACE_CLI_CLIENT_ID = clientId;
     if (clientSecret) env.GOOGLE_WORKSPACE_CLI_CLIENT_SECRET = clientSecret;
     // Ensure gws has a writable config dir (Claude Desktop sandbox is read-only)
