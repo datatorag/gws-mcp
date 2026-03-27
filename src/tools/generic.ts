@@ -62,7 +62,7 @@ export async function handleGeneric(
     args.method as string,
     {
       params: args.params as Record<string, unknown> | undefined,
-      jsonBody: args.json_body || args.body,
+      jsonBody: args.json_body ?? args.body,
       pageAll: args.page_all as boolean | undefined,
       dryRun: args.dry_run as boolean | undefined,
     }

@@ -29,8 +29,9 @@ gwsClient.authStatus().then((status) => {
       stderrBuf += chunk.toString();
       const match = stderrBuf.match(/(https:\/\/accounts\.google\.com\/o\/oauth2\/auth[^\s]+)/);
       if (match) {
+        child.stderr?.removeAllListeners("data");
         stderrBuf = "";
-        const openCmd = process.platform === "win32" ? "start" : "open";
+        const openCmd = process.platform === "win32" ? "start" : process.platform === "linux" ? "xdg-open" : "open";
         spawn(openCmd, [match[1]], { stdio: "ignore", shell: process.platform === "win32" });
       }
     });

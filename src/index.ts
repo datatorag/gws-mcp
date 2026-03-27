@@ -37,16 +37,17 @@ const httpServer = createServer(async (req, res) => {
     },
   });
 
-  transport.onclose = () => {
-    if (transport.sessionId) {
-      transports.delete(transport.sessionId);
-    }
-  };
-
   // If X-User-Token is provided, create a per-session client with that access token
   const userToken = req.headers["x-user-token"] as string | undefined;
   const client = userToken ? new GwsClient({ accessToken: userToken }) : undefined;
   const server = createMcpServer(client);
+
+  transport.onclose = () => {
+    if (transport.sessionId) {
+      transports.delete(transport.sessionId);
+    }
+    server.close().catch(() => {});
+  };
   await server.connect(transport);
   await transport.handleRequest(req, res);
 });

@@ -8,13 +8,17 @@ import { fileURLToPath } from "node:url";
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+let _bundledOAuth: { clientId?: string; clientSecret?: string } | undefined;
 function loadBundledOAuth(): { clientId?: string; clientSecret?: string } {
-  try {
-    const raw = readFileSync(path.join(__dirname, "oauth.json"), "utf-8");
-    return JSON.parse(raw);
-  } catch {
-    return {};
+  if (!_bundledOAuth) {
+    try {
+      const raw = readFileSync(path.join(__dirname, "oauth.json"), "utf-8");
+      _bundledOAuth = JSON.parse(raw);
+    } catch {
+      _bundledOAuth = {};
+    }
   }
+  return _bundledOAuth!;
 }
 
 export interface GwsResult {
@@ -42,6 +46,8 @@ function getGwsBinaryPath(): string {
   );
 }
 
+const gwsBinaryPath = getGwsBinaryPath();
+
 export interface GwsClientOptions {
   clientId?: string;
   clientSecret?: string;
@@ -53,7 +59,7 @@ export class GwsClient {
   private mergedEnv: NodeJS.ProcessEnv;
 
   constructor(options?: GwsClientOptions) {
-    this.binaryPath = getGwsBinaryPath();
+    this.binaryPath = gwsBinaryPath;
     const env: Record<string, string> = {};
     const bundled = loadBundledOAuth();
     const clientId = options?.clientId || process.env.GWS_OAUTH_CLIENT_ID || bundled.clientId;
