@@ -57,6 +57,7 @@ export interface GwsClientOptions {
 export class GwsClient {
   private binaryPath: string;
   private mergedEnv: NodeJS.ProcessEnv;
+  private defaultAccessToken?: string;
 
   constructor(options?: GwsClientOptions) {
     this.binaryPath = gwsBinaryPath;
@@ -64,7 +65,6 @@ export class GwsClient {
     const bundled = loadBundledOAuth();
     const clientId = options?.clientId || process.env.GWS_OAUTH_CLIENT_ID || bundled.clientId;
     const clientSecret = options?.clientSecret || process.env.GWS_OAUTH_CLIENT_SECRET || bundled.clientSecret;
-    if (options?.accessToken) env.GOOGLE_WORKSPACE_CLI_TOKEN = options.accessToken;
     if (clientId) env.GOOGLE_WORKSPACE_CLI_CLIENT_ID = clientId;
     if (clientSecret) env.GOOGLE_WORKSPACE_CLI_CLIENT_SECRET = clientSecret;
     // Ensure gws has a writable config dir (Claude Desktop sandbox is read-only)
@@ -72,6 +72,29 @@ export class GwsClient {
       env.GOOGLE_WORKSPACE_CLI_CONFIG_DIR = path.join(os.homedir(), ".config", "gws");
     }
     this.mergedEnv = { ...process.env, ...env };
+    this.defaultAccessToken = options?.accessToken;
+  }
+
+  /** Returns a new GwsClient that uses the given access token for all calls. */
+  withToken(accessToken: string): GwsClient {
+    const clone = Object.create(GwsClient.prototype) as GwsClient;
+    clone.binaryPath = this.binaryPath;
+    clone.mergedEnv = this.mergedEnv;
+    clone.defaultAccessToken = accessToken;
+    return clone;
+  }
+
+  /** Clear stored credentials so the next login gets a fresh token. */
+  async logout(): Promise<void> {
+    try {
+      await execFileAsync(this.binaryPath, ["auth", "logout"], {
+        timeout: 10_000,
+        env: this.mergedEnv,
+        cwd: os.tmpdir(),
+      });
+    } catch {
+      // Ignore — may already be logged out
+    }
   }
 
   /** Spawn a background auth login process. Returns the child for stderr monitoring. */
@@ -87,15 +110,19 @@ export class GwsClient {
 
   async exec(
     args: string[],
-    options?: { timeout?: number }
+    options?: { timeout?: number; accessToken?: string }
   ): Promise<GwsResult> {
     const timeout = options?.timeout ?? 30_000;
+    const token = options?.accessToken || this.defaultAccessToken;
+    const env = token
+      ? { ...this.mergedEnv, GOOGLE_WORKSPACE_CLI_TOKEN: token }
+      : this.mergedEnv;
 
     try {
       const { stdout, stderr } = await execFileAsync(this.binaryPath, args, {
         timeout,
         maxBuffer: 10 * 1024 * 1024,
-        env: this.mergedEnv,
+        env,
         cwd: os.tmpdir(),
       });
 
@@ -149,7 +176,8 @@ export class GwsClient {
   async helper(
     service: string,
     command: string,
-    flags: Record<string, string>
+    flags: Record<string, string>,
+    accessToken?: string
   ): Promise<GwsResult> {
     const args = [service, `+${command}`];
     for (const [key, value] of Object.entries(flags)) {
@@ -157,7 +185,7 @@ export class GwsClient {
         args.push(`--${key}`, value);
       }
     }
-    return this.exec(args);
+    return this.exec(args, { accessToken });
   }
 
   async api(
@@ -169,6 +197,7 @@ export class GwsClient {
       jsonBody?: unknown;
       pageAll?: boolean;
       dryRun?: boolean;
+      accessToken?: string;
     }
   ): Promise<GwsResult> {
     const args = [service, ...resource.split("."), method];
@@ -187,7 +216,7 @@ export class GwsClient {
     }
 
     const timeout = options?.pageAll ? 120_000 : 30_000;
-    return this.exec(args, { timeout });
+    return this.exec(args, { timeout, accessToken: options?.accessToken });
   }
 
   async authLogin(services?: string): Promise<GwsResult> {

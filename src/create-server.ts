@@ -19,8 +19,13 @@ export function createMcpServer(client?: GwsClient): Server {
     tools: allTools,
   }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const { name, arguments: args = {} } = request.params;
+
+    // Use the MCP bearer token for gws CLI calls when available
+    const client = extra.authInfo?.token
+      ? activeClient.withToken(extra.authInfo.token)
+      : activeClient;
 
     try {
       const handler = toolHandlers.get(name);
@@ -30,7 +35,7 @@ export function createMcpServer(client?: GwsClient): Server {
           isError: true,
         };
       }
-      return await handler(activeClient, name, args as Record<string, unknown>);
+      return await handler(client, name, args as Record<string, unknown>);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       return {

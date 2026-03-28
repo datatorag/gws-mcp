@@ -8,6 +8,7 @@ import { contactsTools, handleContacts } from "./contacts.js";
 import { sheetsTools, handleSheets } from "./sheets.js";
 import { docsTools, handleDocs } from "./docs.js";
 import { slidesTools, handleSlides } from "./slides.js";
+import { tasksTools, handleTasks } from "./tasks.js";
 
 export type ToolHandler = (
   client: GwsClient,
@@ -24,6 +25,7 @@ export const allTools = [
   ...sheetsTools,
   ...docsTools,
   ...slidesTools,
+  ...tasksTools,
   ...genericTools,
 ];
 
@@ -43,5 +45,6 @@ export const toolHandlers = new Map<string, ToolHandler>([
   ...register(sheetsTools, handleSheets),
   ...register(docsTools, handleDocs),
   ...register(slidesTools, handleSlides),
+  ...register(tasksTools, handleTasks),
   ...register(genericTools, (c, _n, a) => handleGeneric(c, a)),
 ]);
