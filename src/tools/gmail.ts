@@ -132,6 +132,32 @@ export const gmailTools = [
     },
     annotations: { destructiveHint: false, readOnlyHint: true },
   },
+  {
+    name: "gmail_create_draft",
+    description:
+      "Create a draft email in Gmail without sending it. The draft can be reviewed and sent later from Gmail. Returns the draft ID and a link to open it in Gmail.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        to: {
+          type: "string",
+          description: "Recipient email address(es), comma-separated",
+        },
+        subject: { type: "string", description: "Email subject line" },
+        body: { type: "string", description: "Email body text" },
+        cc: {
+          type: "string",
+          description: "CC recipients, comma-separated",
+        },
+        bcc: {
+          type: "string",
+          description: "BCC recipients, comma-separated",
+        },
+      },
+      required: ["to", "subject", "body"],
+    },
+    annotations: { destructiveHint: false, readOnlyHint: false },
+  },
 ];
 
 const METADATA_HEADERS = "From,To,Subject,Date";
@@ -223,6 +249,33 @@ export async function handleGmail(
         labelIds: (args.label as string) || "INBOX",
         maxResults: (args.max_results as number) || 10,
       });
+
+    case "gmail_create_draft": {
+      const headers = [
+        `To: ${args.to as string}`,
+        `Subject: ${args.subject as string}`,
+      ];
+      if (args.cc) headers.push(`Cc: ${args.cc as string}`);
+      if (args.bcc) headers.push(`Bcc: ${args.bcc as string}`);
+      headers.push("Content-Type: text/plain; charset=utf-8");
+      const raw = Buffer.from(
+        `${headers.join("\r\n")}\r\n\r\n${args.body as string}`
+      )
+        .toString("base64url");
+      const result = await client.api("gmail", "users.drafts", "create", {
+        params: { userId: "me" },
+        jsonBody: { message: { raw } },
+      });
+      const draft = result.data as {
+        id?: string;
+        message?: { id?: string };
+      };
+      const messageId = draft?.message?.id || "";
+      return jsonResponse({
+        ...draft,
+        gmail_url: `https://mail.google.com/mail/u/0/#drafts?compose=${messageId}`,
+      });
+    }
 
     default:
       throw new Error(`Unknown Gmail tool: ${toolName}`);
