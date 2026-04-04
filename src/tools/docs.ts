@@ -98,23 +98,22 @@ export const docsTools = [
   },
 ];
 
+interface ParagraphElement {
+  startIndex?: number;
+  endIndex?: number;
+  textRun?: { content?: string };
+  inlineObjectElement?: { inlineObjectId?: string };
+}
+
 interface DocElement {
   startIndex?: number;
   endIndex?: number;
   paragraph?: {
-    elements?: Array<{
-      startIndex?: number;
-      endIndex?: number;
-      textRun?: { content?: string };
-    }>;
+    elements?: ParagraphElement[];
   };
 }
 
-function extractText(data: Record<string, unknown>): {
-  documentId: unknown;
-  title: unknown;
-  text: string;
-} {
+function extractText(data: Record<string, unknown>): Record<string, unknown> {
   const body = data.body as { content?: DocElement[] } | undefined;
   const elements = body?.content || [];
   const parts: string[] = [];
@@ -122,25 +121,24 @@ function extractText(data: Record<string, unknown>): {
     if (el.paragraph?.elements) {
       for (const run of el.paragraph.elements) {
         if (run.textRun?.content) parts.push(run.textRun.content);
+        else if (run.inlineObjectElement?.inlineObjectId)
+          parts.push(`[image:${run.inlineObjectElement.inlineObjectId}]`);
       }
     }
   }
-  return {
+  const result: Record<string, unknown> = {
     documentId: data.documentId,
     title: data.title,
     text: parts.join(""),
   };
+  if (data.inlineObjects) result.inlineObjects = data.inlineObjects;
+  return result;
 }
 
-function extractIndexed(data: Record<string, unknown>): {
-  documentId: unknown;
-  title: unknown;
-  content: Array<{ startIndex: number; endIndex: number; text: string }>;
-} {
+function extractIndexed(data: Record<string, unknown>): Record<string, unknown> {
   const body = data.body as { content?: DocElement[] } | undefined;
   const elements = body?.content || [];
-  const content: Array<{ startIndex: number; endIndex: number; text: string }> =
-    [];
+  const content: Array<Record<string, unknown>> = [];
   for (const el of elements) {
     if (el.paragraph?.elements) {
       for (const run of el.paragraph.elements) {
@@ -150,11 +148,23 @@ function extractIndexed(data: Record<string, unknown>): {
             endIndex: run.endIndex ?? 0,
             text: run.textRun.content,
           });
+        } else if (run.inlineObjectElement?.inlineObjectId) {
+          content.push({
+            startIndex: run.startIndex ?? 0,
+            endIndex: run.endIndex ?? 0,
+            inlineObjectId: run.inlineObjectElement.inlineObjectId,
+          });
         }
       }
     }
   }
-  return { documentId: data.documentId, title: data.title, content };
+  const result: Record<string, unknown> = {
+    documentId: data.documentId,
+    title: data.title,
+    content,
+  };
+  if (data.inlineObjects) result.inlineObjects = data.inlineObjects;
+  return result;
 }
 
 export async function handleDocs(
