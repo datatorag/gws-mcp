@@ -163,6 +163,41 @@ export const gmailTools = [
     annotations: { destructiveHint: false, readOnlyHint: false },
   },
   {
+    name: "gmail_update_draft",
+    description:
+      "Update an existing draft email in Gmail. This fully replaces the draft's message content (Gmail API does not support partial edits). If thread_id is omitted, the tool preserves the existing thread automatically.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        draft_id: {
+          type: "string",
+          description: "The Gmail draft ID to update",
+        },
+        to: {
+          type: "string",
+          description: "Recipient email address(es), comma-separated",
+        },
+        subject: { type: "string", description: "Email subject line" },
+        body: { type: "string", description: "Email body text" },
+        cc: {
+          type: "string",
+          description: "CC recipients, comma-separated",
+        },
+        bcc: {
+          type: "string",
+          description: "BCC recipients, comma-separated",
+        },
+        thread_id: {
+          type: "string",
+          description:
+            "Thread ID to preserve threading. If omitted, the existing draft's thread is preserved automatically.",
+        },
+      },
+      required: ["draft_id", "to", "subject", "body"],
+    },
+    annotations: { destructiveHint: true, readOnlyHint: false },
+  },
+  {
     name: "gmail_save_attachment_to_drive",
     description:
       "Save a Gmail attachment directly to Google Drive. Use gmail_read first to get attachment metadata (filename, mimeType, attachmentId) from the message parts. The file is fetched from Gmail and uploaded to Drive server-side — no base64 data flows through the conversation. Returns the Drive file metadata including a web link.",
@@ -353,6 +388,49 @@ export async function handleGmail(
       const draft = result.data as {
         id?: string;
         message?: { id?: string };
+      };
+      const messageId = draft?.message?.id || "";
+      return jsonResponse({
+        ...draft,
+        gmail_url: `https://mail.google.com/mail/u/0/#drafts?compose=${messageId}`,
+      });
+    }
+
+    case "gmail_update_draft": {
+      // If no thread_id provided, fetch the existing draft to preserve its thread
+      let threadId = args.thread_id as string | undefined;
+      if (!threadId) {
+        const existing = await client.api("gmail", "users.drafts", "get", {
+          params: { userId: "me", id: args.draft_id, format: "metadata" },
+        });
+        const existingData = existing.data as {
+          message?: { threadId?: string; payload?: { headers?: { name: string; value: string }[] } };
+        };
+        threadId = existingData?.message?.threadId;
+      }
+
+      const headers = [
+        `To: ${args.to as string}`,
+        `Subject: ${args.subject as string}`,
+      ];
+      if (args.cc) headers.push(`Cc: ${args.cc as string}`);
+      if (args.bcc) headers.push(`Bcc: ${args.bcc as string}`);
+      headers.push("Content-Type: text/plain; charset=utf-8");
+      const raw = Buffer.from(
+        `${headers.join("\r\n")}\r\n\r\n${args.body as string}`
+      )
+        .toString("base64url");
+
+      const message: Record<string, unknown> = { raw };
+      if (threadId) message.threadId = threadId;
+
+      const result = await client.api("gmail", "users.drafts", "update", {
+        params: { userId: "me", id: args.draft_id },
+        jsonBody: { message },
+      });
+      const draft = result.data as {
+        id?: string;
+        message?: { id?: string; threadId?: string };
       };
       const messageId = draft?.message?.id || "";
       return jsonResponse({
