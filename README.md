@@ -1,39 +1,50 @@
-# Google Workspace MCP Extension for Claude
+# Google Workspace MCP Server
 
-A [Model Context Protocol](https://modelcontextprotocol.io/) server that gives Claude access to Google Workspace — Gmail, Calendar, Drive, Contacts, Sheets, Docs, Slides, and 100+ APIs via the [gws CLI](https://github.com/googleworkspace/cli).
+A [Model Context Protocol](https://modelcontextprotocol.io/) server that gives Claude access to Google Workspace — Gmail, Calendar, Drive, Contacts, Sheets, Docs, Slides, Tasks, and 100+ APIs via the [gws CLI](https://github.com/googleworkspace/cli).
 
 ## Tools
 
 | Service | Tools | Operations |
 |---------|-------|------------|
-| **Gmail** | 7 | send, reply, forward, triage, read, search, list |
+| **Gmail** | 11 | send, reply, forward, triage, read, search, list, create draft, update draft, mark read, save attachment to Drive |
 | **Calendar** | 6 | list events, get event, create, update, delete, freebusy |
 | **Contacts** | 7 | search, get, list, create, update, delete, directory search |
-| **Drive** | 2 | search, read file |
+| **Drive** | 3 | search, read file, create folder |
 | **Sheets** | 5 | read, update, append, create, delete |
 | **Docs** | 5 | get, write, batch update, create, delete |
 | **Slides** | 4 | get, create, batch update, delete |
+| **Tasks** | 6 | list task lists, list tasks, create, update, complete, delete |
 | **Generic** | 1 | `gws_run` — fallback for any GWS API not covered above |
 | **Auth** | 1 | OAuth login and status |
 
-**38 tools total.** All tools support shared (team) Drives.
+**49 tools total.** All tools support shared (team) Drives.
 
 ### Key tool details
 
+**gmail_create_draft / gmail_update_draft** — Create or replace a Gmail draft. Constructs RFC 2822 MIME messages from structured parameters (to, subject, body, cc, bcc) and base64url-encodes them. `gmail_update_draft` preserves threading automatically — if no `thread_id` is provided, it fetches the existing draft's thread ID before replacing the message.
+
+**gmail_mark_read** — Marks a message as read by removing the UNREAD label. Also supports adding/removing arbitrary labels (STARRED, IMPORTANT, etc.) via `add_labels` and `remove_labels` arrays. Always removes UNREAD regardless of other label changes.
+
+**gmail_save_attachment_to_drive** — Fetches an attachment from Gmail and uploads it directly to Drive server-side. No base64 data flows through the conversation. Uses async file I/O with guaranteed temp file cleanup via try/finally.
+
 **drive_search** — Searches across both personal and shared Drives. Supports full [Drive query syntax](https://developers.google.com/drive/api/guides/search-files) including folder parents, mimeType filters, and name matching.
+
+**drive_create_folder** — Creates a folder in Drive, optionally inside a parent folder.
 
 **drive_read_file** — Reads the text content of any file in Drive by file ID. Routes by mimeType:
 - Google Docs → plain text extraction
 - Google Sheets → row/column data (A1:Z1000)
 - Google Slides → slide structure with placeholder maps and text
-- Office formats (.docx, .xlsx, .pptx) → server-side conversion to native Google format via `files.copy` with explicit target mimeType, read converted copy, then delete temp copy (guaranteed cleanup via try/finally)
+- Office formats (.docx, .xlsx, .pptx) → server-side conversion to native Google format, read converted copy, then delete temp copy (guaranteed cleanup via try/finally)
 - Plain text / CSV (`text/plain`, `text/csv`) → raw content fetch
-- Unsupported types (PDF, images, `text/calendar`, `text/html`, etc.) → returns `{ error: "Unsupported file type: <mimeType>" }`
+- Unsupported types (PDF, images, etc.) → returns `{ error: "Unsupported file type: <mimeType>" }`
 
 **docs_get** — Three modes:
-- `text` (default): plain text, best for reading/summarizing
-- `index`: text with startIndex/endIndex character positions, use before positional edits
+- `text` (default): plain text with `[image:<id>]` placeholders for inline images, best for reading/summarizing
+- `index`: text with startIndex/endIndex character positions plus inline object references, use before positional edits
 - `full`: raw API response, for debugging or style operations
+
+All modes include the `inlineObjects` metadata map (contentUri, size, margins, crop, border) when images are present.
 
 **docs_create / sheets_create** — Return stripped responses with only essential fields:
 - docs_create → `{ documentId, title }`
@@ -42,7 +53,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) server that gives C
 **slides_get / slides_create** — Return trimmed responses (no masters, layouts, geometry, styling). Each slide includes:
 - `placeholder_map`: maps standard types (TITLE, BODY, SUBTITLE) to objectIds
 - `elements`: all shapes — both standard placeholders and custom text boxes
-- Empty placeholders are included (with objectId and placeholderType, no text field) so callers can insert text immediately after create without a redundant get call
+- Empty placeholders are included so callers can insert text immediately after create without a redundant get call
 
 **sheets_read** — Returns normalized data:
 - `columnCount` derived from the widest row (handles empty leading rows correctly)
@@ -50,7 +61,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) server that gives C
 
 **sheets_append** — Uses direct Sheets API (`spreadsheets.values.append`) to preserve 2D array structure. Each inner array becomes a separate row.
 
-**docs_write** — Uses batchUpdate API with insertText (not CLI helper), correctly handles newlines, em dashes, and unicode characters.
+**docs_write** — Uses batchUpdate API with insertText, correctly handles newlines, em dashes, and unicode characters.
 
 **gws_run** — Fallback tool for any Google Workspace API not covered by the dedicated tools. Accepts service, resource, method, params, and JSON body. Use only when no dedicated tool exists.
 
@@ -71,6 +82,7 @@ Enable each API you plan to use in your project. Click the links below and hit *
 - [Google Sheets API](https://console.cloud.google.com/apis/library/sheets.googleapis.com)
 - [Google Slides API](https://console.cloud.google.com/apis/library/slides.googleapis.com)
 - [People API](https://console.cloud.google.com/apis/library/people.googleapis.com) (for contacts)
+- [Tasks API](https://console.cloud.google.com/apis/library/tasks.googleapis.com)
 
 ### 3. Configure OAuth consent screen
 
@@ -132,7 +144,7 @@ pnpm run build
 With the env vars from step 5 set, run:
 
 ```bash
-./bin/gws-aarch64-apple-darwin/gws auth login -s drive,gmail,sheets,calendar,docs,slides,people
+./bin/gws-aarch64-apple-darwin/gws auth login -s drive,gmail,sheets,calendar,docs,slides,people,tasks
 ```
 
 ### 4. Start the server
@@ -174,20 +186,21 @@ Or add to Claude Desktop MCP config:
 
 ```
 src/
-├── create-server.ts      # Shared MCP server factory
-├── extension.ts          # Stdio entry point (.mcpb extension)
-├── index.ts              # HTTP entry point (standalone server)
-├── gws-client.ts         # Wrapper around the gws CLI binary
+├── create-server.ts      # Shared MCP server factory (accepts optional per-session client)
+├── extension.ts          # Stdio entry point (.mcpb extension, auto-auth on startup)
+├── index.ts              # HTTP entry point (StreamableHTTP, /health + /mcp endpoints)
+├── gws-client.ts         # Wrapper around the gws CLI binary, DEFAULT_SERVICES constant
 └── tools/
     ├── response.ts       # Response helpers (JSON formatting, 900KB truncation)
     ├── auth.ts           # OAuth login (browser-based, no gcloud needed)
-    ├── gmail.ts          # Gmail tools
+    ├── gmail.ts          # Gmail tools (drafts, mark read, attachments to Drive)
     ├── calendar.ts       # Calendar tools
     ├── contacts.ts       # Contacts / People API tools
-    ├── drive.ts          # Drive tools (search, read file with auto-conversion)
+    ├── drive.ts          # Drive tools (search, read file, create folder)
     ├── sheets.ts         # Sheets tools (normalized reads, direct API append)
-    ├── docs.ts           # Docs tools (text/index/full modes, batchUpdate writes)
+    ├── docs.ts           # Docs tools (text/index/full modes, inline image metadata)
     ├── slides.ts         # Slides tools (trimmed responses, placeholder maps)
+    ├── tasks.ts          # Google Tasks tools (lists, CRUD, complete)
     ├── generic.ts        # Generic gws_run fallback
     └── index.ts          # Tool registry (flat Map<name, handler>)
 ```
@@ -201,11 +214,15 @@ The extension (`extension.ts`) runs via stdio for Claude Desktop `.mcpb` bundles
 - **Shared Drive support**: All Drive API calls include `supportsAllDrives: true` (and `includeItemsFromAllDrives: true` for list operations) so files on team Drives are accessible
 - **Sandbox compatibility**: Sets `cwd: os.tmpdir()` and `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` for Claude Desktop's read-only filesystem
 - **OAuth credentials**: Reads from env vars, falls back to bundled `oauth.json` (injected at build time by `scripts/build-extension.sh`)
-- **Auto-auth**: Extension checks auth status on startup and opens browser for OAuth login if needed (non-blocking — MCP server starts immediately)
+- **Auto-auth**: Extension checks auth status and scope coverage on startup, opens browser for OAuth login if needed (non-blocking — MCP server starts immediately)
+- **X-User-Token support**: HTTP server accepts `X-User-Token` header to create per-session clients with pre-obtained access tokens (via `GOOGLE_WORKSPACE_CLI_TOKEN` env var)
 - **Response truncation**: All responses capped at 900KB to stay within context limits
+- **Context optimization**: docs_get, slides_get, and sheets_read aggressively strip metadata to minimize context usage. docs_get text mode reduces ~50KB API responses to ~2-3KB. slides_get strips masters/layouts/geometry/styling. sheets_read uses the values-only API endpoint.
+- **Inline image metadata**: docs_get includes `inlineObjects` map with image metadata (contentUri, size, margins) without embedding actual image bytes
 - **Slides trimming**: Strips masters, layouts, geometry, and styling from API responses — returns only objectIds, placeholder types, and text content
 - **Office file reading**: `drive_read_file` copies Office files with explicit target mimeType to trigger server-side conversion, reads the native copy, then deletes it (guaranteed cleanup via try/finally)
 - **Unsupported type guard**: `drive_read_file` only fetches raw content for `text/plain` and `text/csv` — all other non-native types return a clean error instead of binary data
+- **Platform support**: macOS (arm64, x64), Linux (x64), Windows (x64)
 
 ## Development
 
