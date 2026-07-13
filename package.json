@@ -11,10 +11,10 @@
     "start": "node server/index.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1"
+    "@modelcontextprotocol/sdk": "^1.29.0"
   },
   "devDependencies": {
-    "@types/node": "^22.15.0",
-    "typescript": "^5.8.0"
+    "@types/node": "^22.19.15",
+    "typescript": "^7.0.2"
   }
 }
