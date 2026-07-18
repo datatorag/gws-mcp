@@ -26,7 +26,6 @@ function loadBundledOAuth(): { clientId?: string; clientSecret?: string } {
 export interface GwsResult {
   success: boolean;
   data: unknown;
-  stderr: string;
 }
 
 function getGwsBinaryPath(): string {
@@ -51,8 +50,6 @@ function getGwsBinaryPath(): string {
 const gwsBinaryPath = getGwsBinaryPath();
 
 export interface GwsClientOptions {
-  clientId?: string;
-  clientSecret?: string;
   accessToken?: string;
 }
 
@@ -65,8 +62,8 @@ export class GwsClient {
     this.binaryPath = gwsBinaryPath;
     const env: Record<string, string> = {};
     const bundled = loadBundledOAuth();
-    const clientId = options?.clientId || process.env.GWS_OAUTH_CLIENT_ID || bundled.clientId;
-    const clientSecret = options?.clientSecret || process.env.GWS_OAUTH_CLIENT_SECRET || bundled.clientSecret;
+    const clientId = process.env.GWS_OAUTH_CLIENT_ID || bundled.clientId;
+    const clientSecret = process.env.GWS_OAUTH_CLIENT_SECRET || bundled.clientSecret;
     if (clientId) env.GOOGLE_WORKSPACE_CLI_CLIENT_ID = clientId;
     if (clientSecret) env.GOOGLE_WORKSPACE_CLI_CLIENT_SECRET = clientSecret;
     // Ensure gws has a writable config dir (Claude Desktop sandbox is read-only)
@@ -100,7 +97,7 @@ export class GwsClient {
   }
 
   /** Spawn a background auth login process. Returns the child for stderr monitoring. */
-  spawnAuth(services: string): ChildProcess {
+  private spawnAuth(services: string): ChildProcess {
     const child = spawn(
       this.binaryPath,
       ["auth", "login", "-s", services],
@@ -108,6 +105,35 @@ export class GwsClient {
     );
     child.unref();
     return child;
+  }
+
+  /**
+   * Spawn a background auth login and resolve with the OAuth URL the gws
+   * binary prints to stderr — or undefined if the process closes or the
+   * timeout elapses without one. The login process keeps running in the
+   * background either way so the browser flow can complete.
+   */
+  spawnAuthForUrl(services: string, timeoutMs = 10_000): Promise<string | undefined> {
+    const child = this.spawnAuth(services);
+    return new Promise((resolve) => {
+      let buf = "";
+      const timer = setTimeout(() => resolve(undefined), timeoutMs);
+      timer.unref?.();
+      child.stderr?.on("data", (chunk: Buffer) => {
+        buf += chunk.toString();
+        const match = buf.match(
+          /(https:\/\/accounts\.google\.com\/o\/oauth2\/auth\S+)/
+        );
+        if (match) {
+          clearTimeout(timer);
+          resolve(match[1]);
+        }
+      });
+      child.on("close", () => {
+        clearTimeout(timer);
+        resolve(undefined);
+      });
+    });
   }
 
   async exec(
@@ -135,7 +161,7 @@ export class GwsClient {
         data = stdout.trim();
       }
 
-      return { success: true, data, stderr };
+      return { success: true, data };
     } catch (err: unknown) {
       const error = err as {
         code?: number | string;
@@ -159,13 +185,14 @@ export class GwsClient {
       }
 
       if (error.stdout) {
+        let parsed: unknown;
         try {
-          const parsed = JSON.parse(error.stdout);
+          parsed = JSON.parse(error.stdout);
+        } catch {
+          // stdout wasn't JSON — fall through to the generic error below
+        }
+        if (parsed !== undefined) {
           throw new Error(`API error: ${JSON.stringify(parsed)}`);
-        } catch (parseErr) {
-          if (parseErr instanceof Error && parseErr.message.startsWith("API error:")) {
-            throw parseErr;
-          }
         }
       }
 
@@ -221,17 +248,11 @@ export class GwsClient {
     return this.exec(args, { timeout, accessToken: options?.accessToken });
   }
 
-  async authLogin(services?: string): Promise<GwsResult> {
-    const args = ["auth", "login"];
-    if (services) args.push("-s", services);
-    return this.exec(args, { timeout: 120_000 });
-  }
-
   async authStatus(): Promise<GwsResult> {
     try {
       return await this.exec(["auth", "status"]);
     } catch {
-      return { success: false, data: null, stderr: "Not authenticated" };
+      return { success: false, data: null };
     }
   }
 }

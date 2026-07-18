@@ -29,7 +29,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) server that gives C
 
 **gmail_send_draft / gmail_delete_draft** — Send or permanently delete an existing draft by its draft ID. `gmail_send_draft` sends a reviewed draft as-is and removes it from Drafts (no orphaned draft left behind), completing the create → review → send loop. `gmail_delete_draft` deletes immediately (does not move to Trash).
 
-**gmail_mark_read** — Marks a message as read by removing the UNREAD label. Also supports adding/removing arbitrary labels (STARRED, IMPORTANT, etc.) via `add_labels` and `remove_labels` arrays. Always removes UNREAD regardless of other label changes.
+**gmail_mark_read** — Marks messages as read by removing the UNREAD label. Also supports adding/removing arbitrary labels (STARRED, IMPORTANT, etc.) via `add_labels` and `remove_labels` arrays. Pass `message_id` for a single message, or `message_ids` (up to 1000) to modify a batch in one API call via `users.messages.batchModify`. Removes UNREAD by default when no label arrays are given.
 
 **gmail_save_attachment_to_drive** — Fetches an attachment from Gmail and uploads it directly to Drive server-side. No base64 data flows through the conversation. Uses async file I/O with guaranteed temp file cleanup via try/finally.
 

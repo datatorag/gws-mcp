@@ -254,12 +254,7 @@ export async function handleContacts(
 
     case "contacts_update": {
       const body = buildPersonBody(args);
-      const updateFields: string[] = [];
-      if (args.name) updateFields.push("names");
-      if (args.email) updateFields.push("emailAddresses");
-      if (args.phone) updateFields.push("phoneNumbers");
-      if (args.company || args.title) updateFields.push("organizations");
-      if (args.notes) updateFields.push("biographies");
+      const updateFields = Object.keys(body);
 
       const result = await client.api("people", "people", "updateContact", {
         params: {
@@ -272,10 +267,10 @@ export async function handleContacts(
     }
 
     case "contacts_delete": {
-      const result = await client.api("people", "people", "deleteContact", {
+      await client.api("people", "people", "deleteContact", {
         params: { resourceName: args.resource_name },
       });
-      return deleteResponse(result, "Contact");
+      return deleteResponse("Contact");
     }
 
     case "contacts_directory_search": {

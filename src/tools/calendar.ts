@@ -308,14 +308,14 @@ export async function handleCalendar(
     }
 
     case "calendar_delete_event": {
-      const result = await client.api("calendar", "events", "delete", {
+      await client.api("calendar", "events", "delete", {
         params: {
           calendarId,
           eventId: args.event_id,
           sendUpdates: (args.send_updates as string) || "all",
         },
       });
-      return deleteResponse(result, "Event");
+      return deleteResponse("Event");
     }
 
     case "calendar_freebusy": {

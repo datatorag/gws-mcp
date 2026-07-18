@@ -1,5 +1,5 @@
 import type { GwsClient } from "../gws-client.js";
-import { jsonResponse, deleteResponse } from "./response.js";
+import { jsonResponse, deleteResponse, deleteDriveFile } from "./response.js";
 
 export const sheetsTools = [
   {
@@ -223,10 +223,8 @@ export async function handleSheets(
     }
 
     case "sheets_delete": {
-      const result = await client.api("drive", "files", "delete", {
-        params: { fileId: args.spreadsheet_id, supportsAllDrives: true },
-      });
-      return deleteResponse(result, "Spreadsheet");
+      await deleteDriveFile(client, args.spreadsheet_id);
+      return deleteResponse("Spreadsheet");
     }
 
     default:

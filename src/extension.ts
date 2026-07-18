@@ -39,17 +39,8 @@ async function triggerReAuth(reason: string) {
   // Clear old credentials first to guarantee a fresh token with all scopes
   await gwsClient.logout();
 
-  const child = gwsClient.spawnAuth(DEFAULT_SERVICES);
-
-  let stderrBuf = "";
-  child.stderr?.on("data", (chunk: Buffer) => {
-    stderrBuf += chunk.toString();
-    const match = stderrBuf.match(/(https:\/\/accounts\.google\.com\/o\/oauth2\/auth[^\s]+)/);
-    if (match) {
-      stderrBuf = "";
-      openAuthUrl(match[1]);
-    }
-  });
+  const authUrl = await gwsClient.spawnAuthForUrl(DEFAULT_SERVICES);
+  if (authUrl) openAuthUrl(authUrl);
 }
 
 // Start MCP server immediately so Claude Desktop doesn't time out
