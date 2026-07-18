@@ -23,6 +23,10 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) server that gives C
 
 **gmail_create_draft / gmail_update_draft** — Create or replace a Gmail draft. Constructs RFC 2822 MIME messages from structured parameters (to, subject, body, cc, bcc) and base64url-encodes them. `gmail_update_draft` preserves threading automatically — if no `thread_id` is provided, it fetches the existing draft's thread ID before replacing the message.
 
+**gmail_read** — Full MIME payload by default. Pass `text_only: true` for a compact view (flattened from/to/cc/subject/date, decoded text body with HTML fallback, attachment metadata) that avoids base64 payloads overflowing the response — typically ~2% of the full size. `max_body_chars` truncates the body with a marker (implies `text_only`).
+
+**gmail_search / gmail_list** — Results are flattened to `{id, threadId, from, to, subject, date, snippet, labelIds}` per message instead of the raw metadata payload.
+
 **gmail_send_draft / gmail_delete_draft** — Send or permanently delete an existing draft by its draft ID. `gmail_send_draft` sends a reviewed draft as-is and removes it from Drafts (no orphaned draft left behind), completing the create → review → send loop. `gmail_delete_draft` deletes immediately (does not move to Trash).
 
 **gmail_mark_read** — Marks a message as read by removing the UNREAD label. Also supports adding/removing arbitrary labels (STARRED, IMPORTANT, etc.) via `add_labels` and `remove_labels` arrays. Always removes UNREAD regardless of other label changes.
