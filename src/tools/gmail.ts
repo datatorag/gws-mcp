@@ -187,6 +187,38 @@ export const gmailTools = [
     annotations: { destructiveHint: true, readOnlyHint: false },
   },
   {
+    name: "gmail_send_draft",
+    description:
+      "Send an existing Gmail draft by its draft ID. Use this to send a draft that was previously created with gmail_create_draft and reviewed — it sends the draft as-is and removes it from the Drafts folder (no orphaned draft). Returns the sent message metadata.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        draft_id: {
+          type: "string",
+          description: "The Gmail draft ID to send",
+        },
+      },
+      required: ["draft_id"],
+    },
+    annotations: { destructiveHint: true, readOnlyHint: false },
+  },
+  {
+    name: "gmail_delete_draft",
+    description:
+      "Permanently delete a Gmail draft by its draft ID. This does not move the draft to Trash — it is removed immediately. Use gmail_send_draft to send a draft instead of deleting it.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        draft_id: {
+          type: "string",
+          description: "The Gmail draft ID to delete",
+        },
+      },
+      required: ["draft_id"],
+    },
+    annotations: { destructiveHint: true, readOnlyHint: false },
+  },
+  {
     name: "gmail_mark_read",
     description:
       "Mark a Gmail message as read by removing the UNREAD label. Can also add or remove other labels. Calls the Gmail API users.messages.modify endpoint.",
@@ -433,6 +465,21 @@ export async function handleGmail(
         jsonBody: { message },
       });
       return draftResponse(result.data);
+    }
+
+    case "gmail_send_draft": {
+      const result = await client.api("gmail", "users.drafts", "send", {
+        params: { userId: "me" },
+        jsonBody: { id: args.draft_id },
+      });
+      return jsonResponse(result.data);
+    }
+
+    case "gmail_delete_draft": {
+      await client.api("gmail", "users.drafts", "delete", {
+        params: { userId: "me", id: args.draft_id },
+      });
+      return jsonResponse({ deleted: true, draft_id: args.draft_id });
     }
 
     case "gmail_mark_read": {

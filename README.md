@@ -6,7 +6,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) server that gives C
 
 | Service | Tools | Operations |
 |---------|-------|------------|
-| **Gmail** | 10 | send, reply, forward, read, search, list, create draft, update draft, mark read, save attachment to Drive |
+| **Gmail** | 12 | send, reply, forward, read, search, list, create draft, update draft, send draft, delete draft, mark read, save attachment to Drive |
 | **Calendar** | 6 | list events, get event, create, update, delete, freebusy |
 | **Contacts** | 7 | search, get, list, create, update, delete, directory search |
 | **Drive** | 3 | search, read file, create folder |
@@ -17,11 +17,13 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) server that gives C
 | **Generic** | 1 | `gws_run` — fallback for any GWS API not covered above |
 | **Auth** | 1 | OAuth login and status |
 
-**48 tools total.** All tools support shared (team) Drives.
+**50 tools total.** All tools support shared (team) Drives.
 
 ### Key tool details
 
 **gmail_create_draft / gmail_update_draft** — Create or replace a Gmail draft. Constructs RFC 2822 MIME messages from structured parameters (to, subject, body, cc, bcc) and base64url-encodes them. `gmail_update_draft` preserves threading automatically — if no `thread_id` is provided, it fetches the existing draft's thread ID before replacing the message.
+
+**gmail_send_draft / gmail_delete_draft** — Send or permanently delete an existing draft by its draft ID. `gmail_send_draft` sends a reviewed draft as-is and removes it from Drafts (no orphaned draft left behind), completing the create → review → send loop. `gmail_delete_draft` deletes immediately (does not move to Trash).
 
 **gmail_mark_read** — Marks a message as read by removing the UNREAD label. Also supports adding/removing arbitrary labels (STARRED, IMPORTANT, etc.) via `add_labels` and `remove_labels` arrays. Always removes UNREAD regardless of other label changes.
 
