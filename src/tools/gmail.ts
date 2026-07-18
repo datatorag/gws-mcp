@@ -5,6 +5,24 @@ import { randomUUID } from "node:crypto";
 import type { GwsClient } from "../gws-client.js";
 import { jsonResponse } from "./response.js";
 
+// Shared to/subject/body/cc/bcc schema for gmail_send and the draft tools
+const emailFields = {
+  to: {
+    type: "string",
+    description: "Recipient email address(es), comma-separated",
+  },
+  subject: { type: "string", description: "Email subject line" },
+  body: { type: "string", description: "Email body text" },
+  cc: {
+    type: "string",
+    description: "CC recipients, comma-separated",
+  },
+  bcc: {
+    type: "string",
+    description: "BCC recipients, comma-separated",
+  },
+};
+
 export const gmailTools = [
   {
     name: "gmail_send",
@@ -12,22 +30,7 @@ export const gmailTools = [
       "Send a new email via Gmail. Composes and sends an email message to the specified recipients.",
     inputSchema: {
       type: "object" as const,
-      properties: {
-        to: {
-          type: "string",
-          description: "Recipient email address(es), comma-separated",
-        },
-        subject: { type: "string", description: "Email subject line" },
-        body: { type: "string", description: "Email body text" },
-        cc: {
-          type: "string",
-          description: "CC recipients, comma-separated",
-        },
-        bcc: {
-          type: "string",
-          description: "BCC recipients, comma-separated",
-        },
-      },
+      properties: { ...emailFields },
       required: ["to", "subject", "body"],
     },
     annotations: { destructiveHint: true, readOnlyHint: false },
@@ -141,22 +144,7 @@ export const gmailTools = [
       "Create a draft email in Gmail without sending it. The draft can be reviewed and sent later from Gmail. Returns the draft ID and a link to open it in Gmail.",
     inputSchema: {
       type: "object" as const,
-      properties: {
-        to: {
-          type: "string",
-          description: "Recipient email address(es), comma-separated",
-        },
-        subject: { type: "string", description: "Email subject line" },
-        body: { type: "string", description: "Email body text" },
-        cc: {
-          type: "string",
-          description: "CC recipients, comma-separated",
-        },
-        bcc: {
-          type: "string",
-          description: "BCC recipients, comma-separated",
-        },
-      },
+      properties: { ...emailFields },
       required: ["to", "subject", "body"],
     },
     annotations: { destructiveHint: false, readOnlyHint: false },
@@ -172,20 +160,7 @@ export const gmailTools = [
           type: "string",
           description: "The Gmail draft ID to update",
         },
-        to: {
-          type: "string",
-          description: "Recipient email address(es), comma-separated",
-        },
-        subject: { type: "string", description: "Email subject line" },
-        body: { type: "string", description: "Email body text" },
-        cc: {
-          type: "string",
-          description: "CC recipients, comma-separated",
-        },
-        bcc: {
-          type: "string",
-          description: "BCC recipients, comma-separated",
-        },
+        ...emailFields,
         thread_id: {
           type: "string",
           description:
@@ -231,13 +206,20 @@ export const gmailTools = [
   {
     name: "gmail_mark_read",
     description:
-      "Mark a Gmail message as read by removing the UNREAD label. Can also add or remove other labels. Calls the Gmail API users.messages.modify endpoint.",
+      "Mark one or more Gmail messages as read by removing the UNREAD label. Can also add or remove other labels. Pass message_id for a single message (returns the modified message) or message_ids for a batch (up to 1000, single API call via users.messages.batchModify).",
     inputSchema: {
       type: "object" as const,
       properties: {
         message_id: {
           type: "string",
-          description: "The Gmail message ID to modify",
+          description:
+            "A single Gmail message ID to modify. Provide either this or message_ids.",
+        },
+        message_ids: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Multiple Gmail message IDs to modify in one batch call (max 1000). Provide either this or message_id.",
         },
         add_labels: {
           type: "array",
@@ -252,7 +234,7 @@ export const gmailTools = [
             'Label IDs to remove (e.g., ["UNREAD", "INBOX"]). Defaults to ["UNREAD"] if neither add_labels nor remove_labels is provided.',
         },
       },
-      required: ["message_id"],
+      required: [] as string[],
     },
     annotations: { destructiveHint: true, readOnlyHint: false },
   },
@@ -619,6 +601,20 @@ export async function handleGmail(
       const body: Record<string, unknown> = {};
       if (addLabels?.length) body.addLabelIds = addLabels;
       body.removeLabelIds = removeLabels?.length ? removeLabels : ["UNREAD"];
+
+      const ids = args.message_ids as string[] | undefined;
+      if (ids?.length) {
+        // batchModify returns an empty body on success
+        await client.api("gmail", "users.messages", "batchModify", {
+          params: { userId: "me" },
+          jsonBody: { ids, ...body },
+        });
+        return jsonResponse({ modified: ids.length, ids, ...body });
+      }
+
+      if (!args.message_id) {
+        throw new Error("Provide either message_id or message_ids");
+      }
       const result = await client.api("gmail", "users.messages", "modify", {
         params: { userId: "me", id: args.message_id },
         jsonBody: body,

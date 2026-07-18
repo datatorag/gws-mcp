@@ -199,13 +199,13 @@ export async function handleTasks(
     }
 
     case "tasks_delete": {
-      const result = await client.api("tasks", "tasks", "delete", {
+      await client.api("tasks", "tasks", "delete", {
         params: {
           tasklist: args.tasklist_id as string,
           task: args.task_id as string,
         },
       });
-      return deleteResponse(result, "Task");
+      return deleteResponse("Task");
     }
 
     default:

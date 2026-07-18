@@ -37,7 +37,7 @@ function register(
 }
 
 export const toolHandlers = new Map<string, ToolHandler>([
-  ...register(authTools, (c, _n, a) => handleAuth(c, a)),
+  ...register(authTools, handleAuth),
   ...register(gmailTools, handleGmail),
   ...register(calendarTools, handleCalendar),
   ...register(contactsTools, handleContacts),
@@ -46,5 +46,5 @@ export const toolHandlers = new Map<string, ToolHandler>([
   ...register(docsTools, handleDocs),
   ...register(slidesTools, handleSlides),
   ...register(tasksTools, handleTasks),
-  ...register(genericTools, (c, _n, a) => handleGeneric(c, a)),
+  ...register(genericTools, handleGeneric),
 ]);

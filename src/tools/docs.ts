@@ -1,5 +1,5 @@
 import type { GwsClient } from "../gws-client.js";
-import { jsonResponse, deleteResponse } from "./response.js";
+import { jsonResponse, deleteResponse, deleteDriveFile } from "./response.js";
 
 export const docsTools = [
   {
@@ -26,7 +26,8 @@ export const docsTools = [
   },
   {
     name: "docs_write",
-    description: "Write/append text content to a Google Doc.",
+    description:
+      "Insert text at the beginning of a Google Doc. To append or edit at a specific position, use docs_get (mode 'index') then docs_batch_update.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -113,58 +114,63 @@ interface DocElement {
   };
 }
 
-function extractText(data: Record<string, unknown>): Record<string, unknown> {
+interface DocRun {
+  startIndex: number;
+  endIndex: number;
+  text?: string;
+  inlineObjectId?: string;
+}
+
+/** Single traversal of the doc body shared by the "text" and "index" modes. */
+function docRuns(data: Record<string, unknown>): DocRun[] {
   const body = data.body as { content?: DocElement[] } | undefined;
-  const elements = body?.content || [];
-  const parts: string[] = [];
-  for (const el of elements) {
-    if (el.paragraph?.elements) {
-      for (const run of el.paragraph.elements) {
-        if (run.textRun?.content) parts.push(run.textRun.content);
-        else if (run.inlineObjectElement?.inlineObjectId)
-          parts.push(`[image:${run.inlineObjectElement.inlineObjectId}]`);
+  const runs: DocRun[] = [];
+  for (const el of body?.content || []) {
+    for (const run of el.paragraph?.elements ?? []) {
+      const base = {
+        startIndex: run.startIndex ?? 0,
+        endIndex: run.endIndex ?? 0,
+      };
+      if (run.textRun?.content) {
+        runs.push({ ...base, text: run.textRun.content });
+      } else if (run.inlineObjectElement?.inlineObjectId) {
+        runs.push({
+          ...base,
+          inlineObjectId: run.inlineObjectElement.inlineObjectId,
+        });
       }
     }
   }
+  return runs;
+}
+
+function docResult(
+  data: Record<string, unknown>,
+  fields: Record<string, unknown>
+): Record<string, unknown> {
   const result: Record<string, unknown> = {
     documentId: data.documentId,
     title: data.title,
-    text: parts.join(""),
+    ...fields,
   };
   if (data.inlineObjects) result.inlineObjects = data.inlineObjects;
   return result;
 }
 
+function extractText(data: Record<string, unknown>): Record<string, unknown> {
+  const text = docRuns(data)
+    .map((r) => r.text ?? `[image:${r.inlineObjectId}]`)
+    .join("");
+  return docResult(data, { text });
+}
+
 function extractIndexed(data: Record<string, unknown>): Record<string, unknown> {
-  const body = data.body as { content?: DocElement[] } | undefined;
-  const elements = body?.content || [];
-  const content: Array<Record<string, unknown>> = [];
-  for (const el of elements) {
-    if (el.paragraph?.elements) {
-      for (const run of el.paragraph.elements) {
-        if (run.textRun?.content) {
-          content.push({
-            startIndex: run.startIndex ?? 0,
-            endIndex: run.endIndex ?? 0,
-            text: run.textRun.content,
-          });
-        } else if (run.inlineObjectElement?.inlineObjectId) {
-          content.push({
-            startIndex: run.startIndex ?? 0,
-            endIndex: run.endIndex ?? 0,
-            inlineObjectId: run.inlineObjectElement.inlineObjectId,
-          });
-        }
-      }
-    }
-  }
-  const result: Record<string, unknown> = {
-    documentId: data.documentId,
-    title: data.title,
-    content,
-  };
-  if (data.inlineObjects) result.inlineObjects = data.inlineObjects;
-  return result;
+  const content = docRuns(data).map(({ startIndex, endIndex, text, inlineObjectId }) =>
+    text !== undefined
+      ? { startIndex, endIndex, text }
+      : { startIndex, endIndex, inlineObjectId }
+  );
+  return docResult(data, { content });
 }
 
 export async function handleDocs(
@@ -213,10 +219,8 @@ export async function handleDocs(
     }
 
     case "docs_delete": {
-      const result = await client.api("drive", "files", "delete", {
-        params: { fileId: args.document_id, supportsAllDrives: true },
-      });
-      return deleteResponse(result, "Document");
+      await deleteDriveFile(client, args.document_id);
+      return deleteResponse("Document");
     }
 
     default:

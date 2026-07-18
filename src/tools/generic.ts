@@ -17,7 +17,7 @@ export const genericTools = [
         resource: {
           type: "string",
           description:
-            "API resource (e.g., events, spaces, users, files, messages)",
+            "API resource. Nested resources use dotted paths matching the API's REST structure — Gmail resources live under users (users.messages, users.drafts, users.labels, users.messages.attachments), not bare names like 'drafts'. Top-level examples: events (calendar), files (drive), spaces (chat).",
         },
         method: {
           type: "string",
@@ -54,6 +54,7 @@ export const genericTools = [
 
 export async function handleGeneric(
   client: GwsClient,
+  _toolName: string,
   args: Record<string, unknown>
 ) {
   const result = await client.api(

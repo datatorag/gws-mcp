@@ -1,5 +1,5 @@
 import type { GwsClient } from "../gws-client.js";
-import { jsonResponse } from "./response.js";
+import { jsonResponse, deleteDriveFile } from "./response.js";
 import { handleDocs } from "./docs.js";
 import { handleSheets } from "./sheets.js";
 import { handleSlides } from "./slides.js";
@@ -172,9 +172,7 @@ async function readFileContent(
       return { error: `Failed to read Office file: ${msg}` };
     } finally {
       if (copy?.id) {
-        await client.api("drive", "files", "delete", {
-          params: { fileId: copy.id, supportsAllDrives: true },
-        }).catch(() => {});
+        await deleteDriveFile(client, copy.id).catch(() => {});
       }
     }
   }
