@@ -70,13 +70,23 @@ export const gmailTools = [
   {
     name: "gmail_read",
     description:
-      "Read a specific email message by its ID. Returns the full message including headers, body, and metadata.",
+      "Read a specific email message by its ID. By default returns the full message including headers, body, and metadata. Use text_only for a compact view (flattened headers, decoded text body, attachment metadata) that avoids large MIME/base64 payloads.",
     inputSchema: {
       type: "object" as const,
       properties: {
         message_id: {
           type: "string",
           description: "The Gmail message ID to read",
+        },
+        text_only: {
+          type: "boolean",
+          description:
+            "Return a compact view instead of the raw MIME payload: flattened from/to/cc/subject/date headers, the decoded text/plain body (falls back to tag-stripped text/html), and attachment metadata (filename, mimeType, attachmentId). Recommended for triage — avoids base64 attachment data overflowing the response.",
+        },
+        max_body_chars: {
+          type: "number",
+          description:
+            "Truncate the returned body text to this many characters (adds a truncation marker). Implies text_only.",
         },
       },
       required: ["message_id"],
@@ -86,7 +96,7 @@ export const gmailTools = [
   {
     name: "gmail_search",
     description:
-      "Search Gmail messages using Gmail search syntax. Returns matching messages with snippets. Supports queries like \"from:client@acme.com\", \"subject:proposal\", \"after:2024/01/01\", \"has:attachment\", \"label:important\".",
+      "Search Gmail messages using Gmail search syntax. Returns matching messages with flattened from/to/subject/date fields plus snippet and labels. Supports queries like \"from:client@acme.com\", \"subject:proposal\", \"after:2024/01/01\", \"has:attachment\", \"label:important\".",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -107,7 +117,7 @@ export const gmailTools = [
   {
     name: "gmail_list",
     description:
-      "List recent emails from the inbox. Optionally filter by label. Returns message IDs, subjects, senders, dates, and snippets.",
+      "List recent emails from the inbox. Optionally filter by label. Returns message IDs with flattened from/to/subject/date fields plus snippet and labels.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -278,7 +288,106 @@ export const gmailTools = [
   },
 ];
 
-const METADATA_HEADERS = "From,To,Subject,Date";
+interface GmailPart {
+  mimeType?: string;
+  filename?: string;
+  body?: { data?: string; attachmentId?: string; size?: number };
+  parts?: GmailPart[];
+}
+
+interface GmailMessage {
+  id?: string;
+  threadId?: string;
+  labelIds?: string[];
+  snippet?: string;
+  payload?: GmailPart & { headers?: { name: string; value: string }[] };
+}
+
+function getHeader(msg: GmailMessage, name: string): string | undefined {
+  const lower = name.toLowerCase();
+  return msg.payload?.headers?.find((h) => h.name.toLowerCase() === lower)
+    ?.value;
+}
+
+function flattenMessage(msg: GmailMessage) {
+  return {
+    id: msg.id,
+    threadId: msg.threadId,
+    from: getHeader(msg, "From"),
+    to: getHeader(msg, "To"),
+    subject: getHeader(msg, "Subject"),
+    date: getHeader(msg, "Date"),
+    snippet: msg.snippet,
+    labelIds: msg.labelIds,
+  };
+}
+
+function findPart(
+  part: GmailPart | undefined,
+  mimeType: string
+): GmailPart | undefined {
+  if (!part) return undefined;
+  if (part.mimeType === mimeType && part.body?.data) return part;
+  for (const p of part.parts ?? []) {
+    const found = findPart(p, mimeType);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function stripHtml(html: string): string {
+  return html
+    .replace(/<(style|script)[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
+    .replace(/&shy;/g, "")
+    // Collapse spacing/invisible chars common in marketing-email preheaders
+    // (en/em/figure spaces, zero-width space, soft hyphen, grapheme joiner)
+    .replace(/[ \t\u2000-\u200B\u00AD\u034F]+/g, " ")
+    .replace(/\s*\n\s*/g, "\n")
+    .trim();
+}
+
+function extractTextBody(payload: GmailPart | undefined): string {
+  const plain = findPart(payload, "text/plain");
+  if (plain?.body?.data) {
+    return Buffer.from(plain.body.data, "base64url").toString("utf-8");
+  }
+  const html = findPart(payload, "text/html");
+  if (html?.body?.data) {
+    return stripHtml(
+      Buffer.from(html.body.data, "base64url").toString("utf-8")
+    );
+  }
+  return "";
+}
+
+function listAttachments(
+  part: GmailPart | undefined,
+  out: {
+    filename?: string;
+    mimeType?: string;
+    attachmentId: string;
+    size?: number;
+  }[] = []
+) {
+  if (part?.body?.attachmentId) {
+    out.push({
+      filename: part.filename,
+      mimeType: part.mimeType,
+      attachmentId: part.body.attachmentId,
+      size: part.body.size,
+    });
+  }
+  for (const p of part?.parts ?? []) listAttachments(p, out);
+  return out;
+}
 
 function buildRawMessage(args: Record<string, unknown>): string {
   const headers = [
@@ -316,16 +425,21 @@ async function fetchMessageList(
   const details = await Promise.all(
     messages.map((m) =>
       client.api("gmail", "users.messages", "get", {
+        // NOTE: no metadataHeaders filter — the gws CLI can only serialize
+        // scalar query params, and a comma-joined value matches no header
+        // name, silently returning zero headers. Plain metadata format
+        // returns all headers; we flatten to the few we need below.
         params: {
           userId: "me",
           id: m.id,
           format: "metadata",
-          metadataHeaders: METADATA_HEADERS,
         },
       })
     )
   );
-  return jsonResponse(details.map((d) => d.data));
+  return jsonResponse(
+    details.map((d) => flattenMessage(d.data as GmailMessage))
+  );
 }
 
 export async function handleGmail(
@@ -370,7 +484,24 @@ export async function handleGmail(
           format: "full",
         },
       });
-      return jsonResponse(result.data);
+      const maxBodyChars = args.max_body_chars as number | undefined;
+      if (!args.text_only && maxBodyChars === undefined) {
+        return jsonResponse(result.data);
+      }
+
+      const msg = result.data as GmailMessage;
+      let body = extractTextBody(msg.payload);
+      if (maxBodyChars !== undefined && body.length > maxBodyChars) {
+        body = `${body.slice(0, maxBodyChars)}\n…[truncated ${
+          body.length - maxBodyChars
+        } of ${body.length} chars]`;
+      }
+      return jsonResponse({
+        ...flattenMessage(msg),
+        cc: getHeader(msg, "Cc"),
+        body,
+        attachments: listAttachments(msg.payload),
+      });
     }
 
     case "gmail_search":
