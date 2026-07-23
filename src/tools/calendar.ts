@@ -10,6 +10,7 @@ interface RawAttendee {
   email?: string;
   self?: boolean;
   responseStatus?: string;
+  optional?: boolean;
   resource?: boolean;
 }
 
@@ -24,8 +25,18 @@ interface RawEvent {
   organizer?: { email?: string };
   attendees?: RawAttendee[];
   hangoutLink?: string;
+  conferenceData?: {
+    entryPoints?: { entryPointType?: string; uri?: string }[];
+  };
+  recurringEventId?: string;
+  attachments?: { title?: string; fileUrl?: string }[];
   eventType?: string;
 }
+
+/** How many (non-resource) attendees a meeting can have before the compact
+ * view collapses the roster to a count. Small meetings keep who's in them —
+ * for a 1:1, the other party IS the information. */
+const COMPACT_ROSTER_MAX = 10;
 
 /** Bound on raw description size fed to the tag-stripper, so its regex
  * passes stay O(cap) on pathological multi-KB HTML blobs instead of
@@ -74,8 +85,31 @@ function compactEvent(event: RawEvent, maxDescriptionChars: number) {
     out.attendee_count = attendees.length;
     const self = attendees.find((a) => a.self);
     if (self?.responseStatus) out.my_response = self.responseStatus;
+    if (attendees.length <= COMPACT_ROSTER_MAX) {
+      out.attendees = attendees.map((a) => ({
+        email: a.email,
+        ...(a.responseStatus && a.responseStatus !== "needsAction"
+          ? { response: a.responseStatus }
+          : {}),
+        ...(a.optional ? { optional: true } : {}),
+      }));
+    }
   }
-  if (event.hangoutLink) out.meet_link = event.hangoutLink;
+  // Join link: Meet lives in hangoutLink; Zoom/Webex/etc. scheduled via
+  // conference add-ons only appear in conferenceData entry points.
+  const joinLink =
+    event.hangoutLink ??
+    event.conferenceData?.entryPoints?.find(
+      (e) => e.entryPointType === "video" && e.uri
+    )?.uri;
+  if (joinLink) out.join_link = joinLink;
+  if (event.recurringEventId) out.recurring = true;
+  if (event.attachments && event.attachments.length > 0) {
+    out.attachments = event.attachments.map((a) => ({
+      title: a.title,
+      fileUrl: a.fileUrl,
+    }));
+  }
   return out;
 }
 
@@ -83,7 +117,7 @@ export const calendarTools = [
   {
     name: "calendar_list_events",
     description:
-      "List upcoming events from a Google Calendar. By default returns a compact view per event — id, title, start/end, location, plain-text description (HTML stripped, truncated), organizer email, attendee count plus your own response status, and Meet link — which keeps busy calendars well within response limits. Use full for the raw Calendar API payload, or calendar_get_event for one event's complete detail.",
+      "List upcoming events from a Google Calendar. By default returns a compact view per event: id, title, start/end, location, plain-text description (HTML stripped, truncated), organizer email, attendee count plus your own response status, the full attendee roster when the meeting has 10 or fewer people, a recurring flag, attachments, and the video join link (Meet or conference-data providers like Zoom). Only large-meeting rosters, reminders, and raw HTML are dropped — use full for the raw Calendar API payload, or calendar_get_event for one event's complete detail.",
     inputSchema: {
       type: "object" as const,
       properties: {
