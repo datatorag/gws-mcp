@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import type { GwsClient } from "../gws-client.js";
-import { jsonResponse } from "./response.js";
+import { jsonResponse, stripHtml, truncate } from "./response.js";
 
 // Shared to/subject/body/cc/bcc schema for gmail_send and the draft tools
 const emailFields = {
@@ -317,25 +317,6 @@ function findPart(
   return undefined;
 }
 
-function stripHtml(html: string): string {
-  return html
-    .replace(/<(style|script)[\s\S]*?<\/\1>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
-    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
-    .replace(/&shy;/g, "")
-    // Collapse spacing/invisible chars common in marketing-email preheaders
-    // (en/em/figure spaces, zero-width space, soft hyphen, grapheme joiner)
-    .replace(/[ \t\u2000-\u200B\u00AD\u034F]+/g, " ")
-    .replace(/\s*\n\s*/g, "\n")
-    .trim();
-}
-
 function extractTextBody(payload: GmailPart | undefined): string {
   const plain = findPart(payload, "text/plain");
   if (plain?.body?.data) {
@@ -473,10 +454,8 @@ export async function handleGmail(
 
       const msg = result.data as GmailMessage;
       let body = extractTextBody(msg.payload);
-      if (maxBodyChars !== undefined && body.length > maxBodyChars) {
-        body = `${body.slice(0, maxBodyChars)}\n…[truncated ${
-          body.length - maxBodyChars
-        } of ${body.length} chars]`;
+      if (maxBodyChars !== undefined) {
+        body = truncate(body, maxBodyChars);
       }
       return jsonResponse({
         ...flattenMessage(msg),
