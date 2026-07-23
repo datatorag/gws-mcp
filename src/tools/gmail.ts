@@ -239,6 +239,99 @@ export const gmailTools = [
     annotations: { destructiveHint: true, readOnlyHint: false },
   },
   {
+    name: "gmail_list_filters",
+    description:
+      "List all Gmail filters (settings > filters) with their criteria and actions. Use this to find a filter's ID before deleting it, or to check what automation already exists before creating a new filter.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {},
+      required: [] as string[],
+    },
+    annotations: { destructiveHint: false, readOnlyHint: true },
+  },
+  {
+    name: "gmail_create_filter",
+    description:
+      "Create a Gmail filter that automatically applies actions to matching incoming mail (e.g. label, archive, mark as read). Requires at least one criteria field and one action field. Note: Gmail filters are immutable — to change an existing filter, create the new one and delete the old with gmail_delete_filter. Requires the gmail.settings.basic scope; if this returns an insufficient-scopes error, re-authenticate with gws_auth_setup action 'login'.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        from: {
+          type: "string",
+          description: "Match messages from this sender (email or domain)",
+        },
+        to: {
+          type: "string",
+          description: "Match messages sent to this recipient",
+        },
+        subject: {
+          type: "string",
+          description: "Match messages with this subject text",
+        },
+        query: {
+          type: "string",
+          description:
+            'Gmail search query to match (e.g. "list:newsletter@example.com has:attachment")',
+        },
+        negated_query: {
+          type: "string",
+          description: "Gmail search query that matching messages must NOT match",
+        },
+        add_labels: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            'Label IDs to apply to matching messages (e.g. a label ID from gmail_create_label, or "STARRED", "IMPORTANT")',
+        },
+        remove_labels: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            'Label IDs to remove from matching messages (e.g. ["UNREAD"] to auto-mark-read, ["INBOX"] to archive)',
+        },
+        forward_to: {
+          type: "string",
+          description:
+            "Forward matching messages to this address (must be a verified forwarding address)",
+        },
+      },
+      required: [] as string[],
+    },
+    annotations: { destructiveHint: false, readOnlyHint: false },
+  },
+  {
+    name: "gmail_delete_filter",
+    description:
+      "Delete a Gmail filter by its ID (find IDs with gmail_list_filters). Deleting a filter does not undo actions it already applied to messages.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        filter_id: {
+          type: "string",
+          description: "The filter ID to delete",
+        },
+      },
+      required: ["filter_id"],
+    },
+    annotations: { destructiveHint: true, readOnlyHint: false },
+  },
+  {
+    name: "gmail_create_label",
+    description:
+      "Create a Gmail label. Nested labels use '/' in the name (e.g. 'Alerts/Nativo'). Returns the created label including its ID, which can be used with gmail_create_filter or gmail_mark_read. To list existing labels, use gws_run with resource users.labels.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        name: {
+          type: "string",
+          description: "The label name to create",
+        },
+      },
+      required: ["name"],
+    },
+    annotations: { destructiveHint: false, readOnlyHint: false },
+  },
+  {
     name: "gmail_save_attachment_to_drive",
     description:
       "Save a Gmail attachment directly to Google Drive. Use gmail_read first to get attachment metadata (filename, mimeType, attachmentId) from the message parts. The file is fetched from Gmail and uploaded to Drive server-side — no base64 data flows through the conversation. Returns the Drive file metadata including a web link.",
@@ -597,6 +690,61 @@ export async function handleGmail(
       const result = await client.api("gmail", "users.messages", "modify", {
         params: { userId: "me", id: args.message_id },
         jsonBody: body,
+      });
+      return jsonResponse(result.data);
+    }
+
+    case "gmail_list_filters": {
+      const result = await client.api("gmail", "users.settings.filters", "list", {
+        params: { userId: "me" },
+      });
+      return jsonResponse(result.data);
+    }
+
+    case "gmail_create_filter": {
+      const criteria: Record<string, unknown> = {};
+      if (args.from) criteria.from = args.from;
+      if (args.to) criteria.to = args.to;
+      if (args.subject) criteria.subject = args.subject;
+      if (args.query) criteria.query = args.query;
+      if (args.negated_query) criteria.negatedQuery = args.negated_query;
+
+      const action: Record<string, unknown> = {};
+      const addLabels = args.add_labels as string[] | undefined;
+      const removeLabels = args.remove_labels as string[] | undefined;
+      if (addLabels?.length) action.addLabelIds = addLabels;
+      if (removeLabels?.length) action.removeLabelIds = removeLabels;
+      if (args.forward_to) action.forward = args.forward_to;
+
+      if (Object.keys(criteria).length === 0) {
+        throw new Error(
+          "Provide at least one criteria field (from, to, subject, query, negated_query)"
+        );
+      }
+      if (Object.keys(action).length === 0) {
+        throw new Error(
+          "Provide at least one action field (add_labels, remove_labels, forward_to)"
+        );
+      }
+
+      const result = await client.api("gmail", "users.settings.filters", "create", {
+        params: { userId: "me" },
+        jsonBody: { criteria, action },
+      });
+      return jsonResponse(result.data);
+    }
+
+    case "gmail_delete_filter": {
+      await client.api("gmail", "users.settings.filters", "delete", {
+        params: { userId: "me", id: args.filter_id },
+      });
+      return jsonResponse({ deleted: true, filter_id: args.filter_id });
+    }
+
+    case "gmail_create_label": {
+      const result = await client.api("gmail", "users.labels", "create", {
+        params: { userId: "me" },
+        jsonBody: { name: args.name },
       });
       return jsonResponse(result.data);
     }

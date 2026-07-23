@@ -6,7 +6,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) server that gives C
 
 | Service | Tools | Operations |
 |---------|-------|------------|
-| **Gmail** | 12 | send, reply, forward, read, search, list, create draft, update draft, send draft, delete draft, mark read, save attachment to Drive |
+| **Gmail** | 16 | send, reply, forward, read, search, list, create draft, update draft, send draft, delete draft, mark read, list filters, create filter, delete filter, create label, save attachment to Drive |
 | **Calendar** | 6 | list events, get event, create, update, delete, freebusy |
 | **Contacts** | 7 | search, get, list, create, update, delete, directory search |
 | **Drive** | 3 | search, read file, create folder |
@@ -17,7 +17,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) server that gives C
 | **Generic** | 1 | `gws_run` — fallback for any GWS API not covered above |
 | **Auth** | 1 | OAuth login and status |
 
-**50 tools total.** All tools support shared (team) Drives.
+**54 tools total.** All tools support shared (team) Drives.
 
 ### Key tool details
 
@@ -30,6 +30,8 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) server that gives C
 **gmail_send_draft / gmail_delete_draft** — Send or permanently delete an existing draft by its draft ID. `gmail_send_draft` sends a reviewed draft as-is and removes it from Drafts (no orphaned draft left behind), completing the create → review → send loop. `gmail_delete_draft` deletes immediately (does not move to Trash).
 
 **gmail_mark_read** — Marks messages as read by removing the UNREAD label. Also supports adding/removing arbitrary labels (STARRED, IMPORTANT, etc.) via `add_labels` and `remove_labels` arrays. Pass `message_id` for a single message, or `message_ids` (up to 1000) to modify a batch in one API call via `users.messages.batchModify`. Removes UNREAD by default when no label arrays are given.
+
+**gmail_list_filters / gmail_create_filter / gmail_delete_filter / gmail_create_label** — Inbox automation: create filters that label, archive, mark-read, or forward matching mail, and create the labels they target. Filter tools need the `gmail.settings.basic` scope — existing installs must re-authenticate once (`gws_auth_setup` with action `login`) to pick it up. Gmail filters are immutable; "editing" one means create new + delete old.
 
 **gmail_save_attachment_to_drive** — Fetches an attachment from Gmail and uploads it directly to Drive server-side. No base64 data flows through the conversation. Uses async file I/O with guaranteed temp file cleanup via try/finally.
 

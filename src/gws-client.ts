@@ -10,6 +10,48 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export const DEFAULT_SERVICES = "drive,gmail,sheets,calendar,docs,slides,people,tasks";
 
+// The gws binary's -s picker maps each service to fixed scopes and has no way
+// to add extras (--scopes REPLACES the service-derived list). We own the map so
+// gmail can include settings.basic (filter management). Keep in sync with the
+// binary's picker; unknown services fall back to -s.
+const SERVICE_SCOPES: Record<string, string[]> = {
+  drive: ["https://www.googleapis.com/auth/drive"],
+  sheets: ["https://www.googleapis.com/auth/spreadsheets"],
+  gmail: [
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/gmail.settings.basic",
+  ],
+  calendar: ["https://www.googleapis.com/auth/calendar"],
+  docs: ["https://www.googleapis.com/auth/documents"],
+  slides: ["https://www.googleapis.com/auth/presentations"],
+  tasks: ["https://www.googleapis.com/auth/tasks"],
+  people: [
+    "https://www.googleapis.com/auth/contacts",
+    "https://www.googleapis.com/auth/contacts.other.readonly",
+    "https://www.googleapis.com/auth/contacts.readonly",
+    "https://www.googleapis.com/auth/directory.readonly",
+    "https://www.googleapis.com/auth/user.addresses.read",
+    "https://www.googleapis.com/auth/user.birthday.read",
+    "https://www.googleapis.com/auth/user.emails.read",
+    "https://www.googleapis.com/auth/user.gender.read",
+    "https://www.googleapis.com/auth/user.organization.read",
+    "https://www.googleapis.com/auth/user.phonenumbers.read",
+    "https://www.googleapis.com/auth/userinfo.profile",
+  ],
+};
+
+/**
+ * Resolve service names to explicit OAuth scopes (the binary appends
+ * openid/userinfo.email itself). Returns undefined if any service is unknown,
+ * so callers can fall back to the binary's own -s picker.
+ */
+function scopesForServices(services: string): string[] | undefined {
+  const names = services.split(",").map((s) => s.trim()).filter(Boolean);
+  const scopes = names.map((name) => SERVICE_SCOPES[name]);
+  if (scopes.some((s) => s === undefined)) return undefined;
+  return [...new Set(scopes.flat() as string[])];
+}
+
 let _bundledOAuth: { clientId?: string; clientSecret?: string } | undefined;
 function loadBundledOAuth(): { clientId?: string; clientSecret?: string } {
   if (!_bundledOAuth) {
@@ -98,9 +140,13 @@ export class GwsClient {
 
   /** Spawn a background auth login process. Returns the child for stderr monitoring. */
   private spawnAuth(services: string): ChildProcess {
+    const scopes = scopesForServices(services);
+    const scopeArgs = scopes
+      ? ["--scopes", scopes.join(",")]
+      : ["-s", services];
     const child = spawn(
       this.binaryPath,
-      ["auth", "login", "-s", services],
+      ["auth", "login", ...scopeArgs],
       { env: this.mergedEnv, stdio: ["ignore", "pipe", "pipe"] }
     );
     child.unref();
