@@ -35,26 +35,14 @@ Two entry points sharing `createMcpServer()` from `create-server.ts`:
 - Binaries for macOS (arm64, x64) and Windows (x64) are bundled in `bin/`
 - Pack with `mcpb pack . google-workspace-mcp.mcpb`
 
-## Quality pass — design-time, not post-hoc
+## Cross-repo guidance
 
-Don't run agent-fan-out review passes (/simplify-style) on every change by
-default. Before implementing, answer these four questions inline (one grep
-each) and let the answers shape the code:
-
-1. **Reuse** — does a helper already exist? Check `src/tools/response.ts`
-   (shared response/text helpers: `jsonResponse`, `stripHtml`, `truncate`)
-   and sibling tool files before writing a new one. Near-match found?
-   Promote it to `response.ts` instead of copying.
-2. **Source of truth** — derive displayed/duplicated values from where they
-   already live; never hand-copy things that will drift.
-3. **Altitude** — if sibling tools have the same problem (e.g. a bloated
-   response shape), fix the shared layer or apply the same fix to the
-   siblings; don't special-case one tool.
-4. **Efficiency** — bound work on large inputs (multi-KB API payloads)
-   before running heavy transforms over them.
-
-Reserve agent fan-out review for explicit requests or large multi-file
-changes.
+DataToRAG development runs from the datatorag-mcp session; the canonical
+skills and workflow guidance (including the design-time "Quality pass"
+checklist) live in that repo's `.claude/skills/` —
+<https://github.com/datatorag/mcp-gateway>, start with `codebase-map`.
+Keep only repo-specific facts in this file; don't duplicate cross-repo
+guidance here, it drifts.
 
 ## Auth flow
 
