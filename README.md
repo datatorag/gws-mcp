@@ -2,6 +2,8 @@
 
 A [Model Context Protocol](https://modelcontextprotocol.io/) server that gives Claude access to Google Workspace — Gmail, Calendar, Drive, Contacts, Sheets, Docs, Slides, Tasks, and 100+ APIs via the [gws CLI](https://github.com/googleworkspace/cli).
 
+This server powers the Google Workspace connector of [DataToRAG](https://datatorag.com), a hosted MCP gateway with per-user OAuth, multi-account support, and Atlassian tools alongside these — add `https://datatorag.com/mcp` to your MCP client and skip the setup below. Or run this server yourself, standalone or as a Claude Desktop extension.
+
 ## Tools
 
 | Service | Tools | Operations |
@@ -34,6 +36,10 @@ A [Model Context Protocol](https://modelcontextprotocol.io/) server that gives C
 **gmail_list_filters / gmail_create_filter / gmail_delete_filter / gmail_create_label** — Inbox automation: create filters that label, archive, mark-read, or forward matching mail, and create the labels they target. Filter tools need the `gmail.settings.basic` scope — existing installs must re-authenticate once (`gws_auth_setup` with action `login`) to pick it up. Gmail filters are immutable; "editing" one means create new + delete old.
 
 **gmail_save_attachment_to_drive** — Fetches an attachment from Gmail and uploads it directly to Drive server-side. No base64 data flows through the conversation. Uses async file I/O with guaranteed temp file cleanup via try/finally.
+
+**calendar_list_events** — Compact view by default: per event you get id, title, times, location, a plain-text description (HTML stripped, truncated at 500 chars, tune with `max_description_chars`), the organizer, an attendee count plus your own response status, video join links (Meet, or Zoom and friends from conference data), a recurring flag, and attachments. Meetings with 10 or fewer attendees keep their full roster, so a 1:1 still tells you who it's with; larger meetings collapse to the count. Roughly 85% smaller than the raw payload on a busy calendar. Pass `full: true` for the raw Calendar API response.
+
+**calendar_get_event** — Full event details with the description converted to plain text. Pass `full: true` to keep the original HTML.
 
 **drive_search** — Searches across both personal and shared Drives. Supports full [Drive query syntax](https://developers.google.com/drive/api/guides/search-files) including folder parents, mimeType filters, and name matching.
 
