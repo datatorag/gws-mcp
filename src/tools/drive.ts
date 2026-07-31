@@ -22,7 +22,7 @@ export const driveTools = [
       },
       required: ["name"],
     },
-    annotations: { destructiveHint: true, readOnlyHint: false },
+    annotations: { title: "Create Drive folder", readOnlyHint: false, destructiveHint: false },
   },
   {
     name: "drive_search",
@@ -43,7 +43,7 @@ export const driveTools = [
       },
       required: ["query"],
     },
-    annotations: { destructiveHint: false, readOnlyHint: true },
+    annotations: { title: "Search Drive files", readOnlyHint: true, destructiveHint: false },
   },
   {
     name: "drive_read_file",
@@ -59,7 +59,7 @@ export const driveTools = [
       },
       required: ["file_id"],
     },
-    annotations: { destructiveHint: false, readOnlyHint: true },
+    annotations: { title: "Read Drive file", readOnlyHint: true, destructiveHint: false },
   },
 ];
 

@@ -9,7 +9,7 @@ export const tasksTools = [
       type: "object" as const,
       properties: {},
     },
-    annotations: { destructiveHint: false, readOnlyHint: true },
+    annotations: { title: "List task lists", readOnlyHint: true, destructiveHint: false },
   },
   {
     name: "tasks_list_tasks",
@@ -34,7 +34,7 @@ export const tasksTools = [
       },
       required: ["tasklist_id"],
     },
-    annotations: { destructiveHint: false, readOnlyHint: true },
+    annotations: { title: "List tasks", readOnlyHint: true, destructiveHint: false },
   },
   {
     name: "tasks_create",
@@ -61,7 +61,7 @@ export const tasksTools = [
       },
       required: ["tasklist_id", "title"],
     },
-    annotations: { destructiveHint: true, readOnlyHint: false },
+    annotations: { title: "Create task", readOnlyHint: false, destructiveHint: false },
   },
   {
     name: "tasks_update",
@@ -92,7 +92,7 @@ export const tasksTools = [
       },
       required: ["tasklist_id", "task_id"],
     },
-    annotations: { destructiveHint: true, readOnlyHint: false },
+    annotations: { title: "Update task", readOnlyHint: false, destructiveHint: true },
   },
   {
     name: "tasks_complete",
@@ -111,7 +111,7 @@ export const tasksTools = [
       },
       required: ["tasklist_id", "task_id"],
     },
-    annotations: { destructiveHint: true, readOnlyHint: false },
+    annotations: { title: "Complete task", readOnlyHint: false, destructiveHint: true },
   },
   {
     name: "tasks_delete",
@@ -130,7 +130,7 @@ export const tasksTools = [
       },
       required: ["tasklist_id", "task_id"],
     },
-    annotations: { destructiveHint: true, readOnlyHint: false },
+    annotations: { title: "Delete task", readOnlyHint: false, destructiveHint: true },
   },
 ];
 

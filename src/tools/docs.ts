@@ -22,7 +22,7 @@ export const docsTools = [
       },
       required: ["document_id"],
     },
-    annotations: { destructiveHint: false, readOnlyHint: true },
+    annotations: { title: "Read document", readOnlyHint: true, destructiveHint: false },
   },
   {
     name: "docs_write",
@@ -42,7 +42,7 @@ export const docsTools = [
       },
       required: ["document_id", "text"],
     },
-    annotations: { destructiveHint: true, readOnlyHint: false },
+    annotations: { title: "Write document content", readOnlyHint: false, destructiveHint: true },
   },
   {
     name: "docs_batch_update",
@@ -64,7 +64,7 @@ export const docsTools = [
       },
       required: ["document_id", "requests"],
     },
-    annotations: { destructiveHint: true, readOnlyHint: false },
+    annotations: { title: "Edit document", readOnlyHint: false, destructiveHint: true },
   },
   {
     name: "docs_create",
@@ -79,7 +79,7 @@ export const docsTools = [
       },
       required: ["title"],
     },
-    annotations: { destructiveHint: true, readOnlyHint: false },
+    annotations: { title: "Create document", readOnlyHint: false, destructiveHint: false },
   },
   {
     name: "docs_delete",
@@ -95,7 +95,7 @@ export const docsTools = [
       },
       required: ["document_id"],
     },
-    annotations: { destructiveHint: true, readOnlyHint: false },
+    annotations: { title: "Delete document", readOnlyHint: false, destructiveHint: true },
   },
 ];
 

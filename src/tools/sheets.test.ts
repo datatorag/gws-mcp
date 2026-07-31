@@ -51,7 +51,7 @@ describe("sheets_add_tab", () => {
     "%s is a write that destroys nothing",
     (name) => {
       const tool = sheetsTools.find((t) => t.name === name);
-      expect(tool?.annotations).toEqual({
+      expect(tool?.annotations).toMatchObject({
         destructiveHint: false,
         readOnlyHint: false,
       });

@@ -48,7 +48,7 @@ export const genericTools = [
       },
       required: ["service", "resource", "method"],
     },
-    annotations: { destructiveHint: true, readOnlyHint: false },
+    annotations: { title: "Run Google Workspace API call", readOnlyHint: false, destructiveHint: true },
   },
 ];
 

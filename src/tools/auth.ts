@@ -24,7 +24,7 @@ export const authTools = [
       },
       required: [] as string[],
     },
-    annotations: { destructiveHint: false, readOnlyHint: true },
+    annotations: { title: "Set up Google authentication", readOnlyHint: false, destructiveHint: false },
   },
 ];
 

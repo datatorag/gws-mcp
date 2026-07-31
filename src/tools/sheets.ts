@@ -21,7 +21,7 @@ export const sheetsTools = [
       },
       required: ["spreadsheet_id", "range"],
     },
-    annotations: { destructiveHint: false, readOnlyHint: true },
+    annotations: { title: "Read spreadsheet range", readOnlyHint: true, destructiveHint: false },
   },
   {
     name: "sheets_update",
@@ -50,7 +50,7 @@ export const sheetsTools = [
       },
       required: ["spreadsheet_id", "range", "values"],
     },
-    annotations: { destructiveHint: true, readOnlyHint: false },
+    annotations: { title: "Update spreadsheet cells", readOnlyHint: false, destructiveHint: true },
   },
   {
     name: "sheets_append",
@@ -80,7 +80,7 @@ export const sheetsTools = [
       },
       required: ["spreadsheet_id", "values"],
     },
-    annotations: { destructiveHint: true, readOnlyHint: false },
+    annotations: { title: "Append spreadsheet rows", readOnlyHint: false, destructiveHint: false },
   },
   {
     name: "sheets_create",
@@ -103,7 +103,7 @@ export const sheetsTools = [
     },
     // A write, but not destructive: it creates a new file and cannot
     // overwrite or remove existing data.
-    annotations: { destructiveHint: false, readOnlyHint: false },
+    annotations: { title: "Create spreadsheet", readOnlyHint: false, destructiveHint: false },
   },
   {
     name: "sheets_add_tab",
@@ -129,7 +129,7 @@ export const sheetsTools = [
       },
       required: ["spreadsheet_id", "title"],
     },
-    annotations: { destructiveHint: false, readOnlyHint: false },
+    annotations: { title: "Add spreadsheet tab", readOnlyHint: false, destructiveHint: false },
   },
   {
     name: "sheets_delete",
@@ -145,7 +145,7 @@ export const sheetsTools = [
       },
       required: ["spreadsheet_id"],
     },
-    annotations: { destructiveHint: true, readOnlyHint: false },
+    annotations: { title: "Delete spreadsheet", readOnlyHint: false, destructiveHint: true },
   },
 ];
 

@@ -21,7 +21,7 @@ export const contactsTools = [
       },
       required: ["query"],
     },
-    annotations: { destructiveHint: false, readOnlyHint: true },
+    annotations: { title: "Search contacts", readOnlyHint: true, destructiveHint: false },
   },
   {
     name: "contacts_get",
@@ -38,7 +38,7 @@ export const contactsTools = [
       },
       required: ["resource_name"],
     },
-    annotations: { destructiveHint: false, readOnlyHint: true },
+    annotations: { title: "Get contact", readOnlyHint: true, destructiveHint: false },
   },
   {
     name: "contacts_list",
@@ -54,7 +54,7 @@ export const contactsTools = [
       },
       required: [] as string[],
     },
-    annotations: { destructiveHint: false, readOnlyHint: true },
+    annotations: { title: "List contacts", readOnlyHint: true, destructiveHint: false },
   },
   {
     name: "contacts_create",
@@ -89,7 +89,7 @@ export const contactsTools = [
       },
       required: ["name"],
     },
-    annotations: { destructiveHint: true, readOnlyHint: false },
+    annotations: { title: "Create contact", readOnlyHint: false, destructiveHint: false },
   },
   {
     name: "contacts_update",
@@ -130,7 +130,7 @@ export const contactsTools = [
       },
       required: ["resource_name"],
     },
-    annotations: { destructiveHint: true, readOnlyHint: false },
+    annotations: { title: "Update contact", readOnlyHint: false, destructiveHint: true },
   },
   {
     name: "contacts_delete",
@@ -146,7 +146,7 @@ export const contactsTools = [
       },
       required: ["resource_name"],
     },
-    annotations: { destructiveHint: true, readOnlyHint: false },
+    annotations: { title: "Delete contact", readOnlyHint: false, destructiveHint: true },
   },
   {
     name: "contacts_directory_search",
@@ -166,7 +166,7 @@ export const contactsTools = [
       },
       required: ["query"],
     },
-    annotations: { destructiveHint: false, readOnlyHint: true },
+    annotations: { title: "Search company directory", readOnlyHint: true, destructiveHint: false },
   },
 ];
 

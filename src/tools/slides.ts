@@ -16,7 +16,7 @@ export const slidesTools = [
       },
       required: ["presentation_id"],
     },
-    annotations: { destructiveHint: false, readOnlyHint: true },
+    annotations: { title: "Read presentation", readOnlyHint: true, destructiveHint: false },
   },
   {
     name: "slides_create",
@@ -32,7 +32,7 @@ export const slidesTools = [
       },
       required: ["title"],
     },
-    annotations: { destructiveHint: true, readOnlyHint: false },
+    annotations: { title: "Create presentation", readOnlyHint: false, destructiveHint: false },
   },
   {
     name: "slides_batch_update",
@@ -54,7 +54,7 @@ export const slidesTools = [
       },
       required: ["presentation_id", "requests"],
     },
-    annotations: { destructiveHint: true, readOnlyHint: false },
+    annotations: { title: "Edit presentation", readOnlyHint: false, destructiveHint: true },
   },
   {
     name: "slides_delete",
@@ -70,7 +70,7 @@ export const slidesTools = [
       },
       required: ["presentation_id"],
     },
-    annotations: { destructiveHint: true, readOnlyHint: false },
+    annotations: { title: "Delete presentation", readOnlyHint: false, destructiveHint: true },
   },
 ];
 

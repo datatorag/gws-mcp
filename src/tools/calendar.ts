@@ -157,7 +157,7 @@ export const calendarTools = [
       },
       required: [] as string[],
     },
-    annotations: { destructiveHint: false, readOnlyHint: true },
+    annotations: { title: "List calendar events", readOnlyHint: true, destructiveHint: false },
   },
   {
     name: "calendar_get_event",
@@ -182,7 +182,7 @@ export const calendarTools = [
       },
       required: ["event_id"],
     },
-    annotations: { destructiveHint: false, readOnlyHint: true },
+    annotations: { title: "Get calendar event", readOnlyHint: true, destructiveHint: false },
   },
   {
     name: "calendar_create_event",
@@ -236,7 +236,7 @@ export const calendarTools = [
       },
       required: ["summary", "start", "end"],
     },
-    annotations: { destructiveHint: true, readOnlyHint: false },
+    annotations: { title: "Create calendar event", readOnlyHint: false, destructiveHint: false },
   },
   {
     name: "calendar_update_event",
@@ -285,7 +285,7 @@ export const calendarTools = [
       },
       required: ["event_id"],
     },
-    annotations: { destructiveHint: true, readOnlyHint: false },
+    annotations: { title: "Update calendar event", readOnlyHint: false, destructiveHint: true },
   },
   {
     name: "calendar_delete_event",
@@ -310,7 +310,7 @@ export const calendarTools = [
       },
       required: ["event_id"],
     },
-    annotations: { destructiveHint: true, readOnlyHint: false },
+    annotations: { title: "Delete calendar event", readOnlyHint: false, destructiveHint: true },
   },
   {
     name: "calendar_freebusy",
@@ -335,7 +335,7 @@ export const calendarTools = [
       },
       required: ["time_min", "time_max", "emails"],
     },
-    annotations: { destructiveHint: false, readOnlyHint: true },
+    annotations: { title: "Check calendar availability", readOnlyHint: true, destructiveHint: false },
   },
 ];
 

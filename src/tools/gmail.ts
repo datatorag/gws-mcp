@@ -33,7 +33,7 @@ export const gmailTools = [
       properties: { ...emailFields },
       required: ["to", "subject", "body"],
     },
-    annotations: { destructiveHint: true, readOnlyHint: false },
+    annotations: { title: "Send email", readOnlyHint: false, destructiveHint: true },
   },
   {
     name: "gmail_reply",
@@ -49,7 +49,7 @@ export const gmailTools = [
       },
       required: ["message_id", "body"],
     },
-    annotations: { destructiveHint: true, readOnlyHint: false },
+    annotations: { title: "Reply to email", readOnlyHint: false, destructiveHint: true },
   },
   {
     name: "gmail_forward",
@@ -68,7 +68,7 @@ export const gmailTools = [
       },
       required: ["message_id", "to"],
     },
-    annotations: { destructiveHint: true, readOnlyHint: false },
+    annotations: { title: "Forward email", readOnlyHint: false, destructiveHint: true },
   },
   {
     name: "gmail_read",
@@ -94,7 +94,7 @@ export const gmailTools = [
       },
       required: ["message_id"],
     },
-    annotations: { destructiveHint: false, readOnlyHint: true },
+    annotations: { title: "Read email", readOnlyHint: true, destructiveHint: false },
   },
   {
     name: "gmail_search",
@@ -115,7 +115,7 @@ export const gmailTools = [
       },
       required: ["query"],
     },
-    annotations: { destructiveHint: false, readOnlyHint: true },
+    annotations: { title: "Search email", readOnlyHint: true, destructiveHint: false },
   },
   {
     name: "gmail_list",
@@ -136,7 +136,7 @@ export const gmailTools = [
       },
       required: [] as string[],
     },
-    annotations: { destructiveHint: false, readOnlyHint: true },
+    annotations: { title: "List emails", readOnlyHint: true, destructiveHint: false },
   },
   {
     name: "gmail_create_draft",
@@ -147,7 +147,7 @@ export const gmailTools = [
       properties: { ...emailFields },
       required: ["to", "subject", "body"],
     },
-    annotations: { destructiveHint: false, readOnlyHint: false },
+    annotations: { title: "Create email draft", readOnlyHint: false, destructiveHint: false },
   },
   {
     name: "gmail_update_draft",
@@ -169,7 +169,7 @@ export const gmailTools = [
       },
       required: ["draft_id", "to", "subject", "body"],
     },
-    annotations: { destructiveHint: true, readOnlyHint: false },
+    annotations: { title: "Update email draft", readOnlyHint: false, destructiveHint: true },
   },
   {
     name: "gmail_send_draft",
@@ -185,7 +185,7 @@ export const gmailTools = [
       },
       required: ["draft_id"],
     },
-    annotations: { destructiveHint: true, readOnlyHint: false },
+    annotations: { title: "Send email draft", readOnlyHint: false, destructiveHint: true },
   },
   {
     name: "gmail_delete_draft",
@@ -201,7 +201,7 @@ export const gmailTools = [
       },
       required: ["draft_id"],
     },
-    annotations: { destructiveHint: true, readOnlyHint: false },
+    annotations: { title: "Delete email draft", readOnlyHint: false, destructiveHint: true },
   },
   {
     name: "gmail_mark_read",
@@ -236,7 +236,7 @@ export const gmailTools = [
       },
       required: [] as string[],
     },
-    annotations: { destructiveHint: true, readOnlyHint: false },
+    annotations: { title: "Mark email as read", readOnlyHint: false, destructiveHint: true },
   },
   {
     name: "gmail_list_filters",
@@ -247,7 +247,7 @@ export const gmailTools = [
       properties: {},
       required: [] as string[],
     },
-    annotations: { destructiveHint: false, readOnlyHint: true },
+    annotations: { title: "List email filters", readOnlyHint: true, destructiveHint: false },
   },
   {
     name: "gmail_create_filter",
@@ -297,7 +297,7 @@ export const gmailTools = [
       },
       required: [] as string[],
     },
-    annotations: { destructiveHint: false, readOnlyHint: false },
+    annotations: { title: "Create email filter", readOnlyHint: false, destructiveHint: false },
   },
   {
     name: "gmail_delete_filter",
@@ -313,7 +313,7 @@ export const gmailTools = [
       },
       required: ["filter_id"],
     },
-    annotations: { destructiveHint: true, readOnlyHint: false },
+    annotations: { title: "Delete email filter", readOnlyHint: false, destructiveHint: true },
   },
   {
     name: "gmail_create_label",
@@ -329,7 +329,7 @@ export const gmailTools = [
       },
       required: ["name"],
     },
-    annotations: { destructiveHint: false, readOnlyHint: false },
+    annotations: { title: "Create email label", readOnlyHint: false, destructiveHint: false },
   },
   {
     name: "gmail_save_attachment_to_drive",
@@ -359,7 +359,7 @@ export const gmailTools = [
       },
       required: ["message_id", "attachment_id", "filename"],
     },
-    annotations: { destructiveHint: false, readOnlyHint: false },
+    annotations: { title: "Save email attachment to Drive", readOnlyHint: false, destructiveHint: false },
   },
 ];
 
