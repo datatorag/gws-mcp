@@ -155,23 +155,11 @@ export const sheetsTools = [
  * "Sheet1!A:A" → "Sheet1"), or undefined when the range has no tab prefix.
  * A doubled single quote inside a quoted name is the A1 escape for one. */
 export function tabNameFromRange(range: string): string | undefined {
-  if (range.startsWith("'")) {
-    let i = 1;
-    let name = "";
-    while (i < range.length) {
-      if (range[i] === "'") {
-        if (range[i + 1] === "'") {
-          name += "'";
-          i += 2;
-          continue;
-        }
-        break;
-      }
-      name += range[i];
-      i += 1;
-    }
-    return range[i] === "'" && range[i + 1] === "!" ? name : undefined;
-  }
+  const quoted = /^'((?:[^']|'')*)'!/.exec(range);
+  if (quoted) return quoted[1].replace(/''/g, "'");
+  // A leading quote that didn't match is an unterminated/garbled quoted
+  // prefix — not a bare tab name for the fallback below to mangle.
+  if (range.startsWith("'")) return undefined;
   const bang = range.indexOf("!");
   return bang > 0 ? range.slice(0, bang) : undefined;
 }
@@ -222,35 +210,56 @@ async function rethrowWithTabContext(
   );
 }
 
+const APPEND_DEFAULT_RANGE = "Sheet1!A1";
+
+/** The A1 range a Sheets call addresses, so the seam in `handleSheets` can
+ * explain missing-tab failures for every ranged call — including
+ * sheets_add_tab's own header write — without each case wrapping itself. */
+function rangeInvolvedIn(
+  toolName: string,
+  args: Record<string, unknown>
+): string | undefined {
+  if (typeof args.range === "string") return args.range;
+  if (toolName === "sheets_append") return APPEND_DEFAULT_RANGE;
+  if (toolName === "sheets_add_tab" && typeof args.title === "string") {
+    return `${quoteTabForRange(args.title)}!A1`;
+  }
+  return undefined;
+}
+
 export async function handleSheets(
+  client: GwsClient,
+  toolName: string,
+  args: Record<string, unknown>
+) {
+  try {
+    return await dispatchSheets(client, toolName, args);
+  } catch (err) {
+    const range = rangeInvolvedIn(toolName, args);
+    if (!range) throw err;
+    await rethrowWithTabContext(client, args.spreadsheet_id, range, err);
+    throw err;
+  }
+}
+
+async function dispatchSheets(
   client: GwsClient,
   toolName: string,
   args: Record<string, unknown>
 ) {
   switch (toolName) {
     case "sheets_read": {
-      let result;
-      try {
-        result = await client.api(
-          "sheets",
-          "spreadsheets.values",
-          "get",
-          {
-            params: {
-              spreadsheetId: args.spreadsheet_id,
-              range: args.range,
-            },
-          }
-        );
-      } catch (err) {
-        await rethrowWithTabContext(
-          client,
-          args.spreadsheet_id,
-          args.range as string,
-          err
-        );
-        throw err;
-      }
+      const result = await client.api(
+        "sheets",
+        "spreadsheets.values",
+        "get",
+        {
+          params: {
+            spreadsheetId: args.spreadsheet_id,
+            range: args.range,
+          },
+        }
+      );
       const data = result.data as Record<string, unknown>;
       const values = (data.values as string[][] | undefined) || [];
       const columnCount = values.reduce((max, row) => Math.max(max, row.length), 0);
@@ -268,59 +277,42 @@ export async function handleSheets(
     }
 
     case "sheets_update": {
-      let result;
-      try {
-        result = await client.api(
-          "sheets",
-          "spreadsheets.values",
-          "update",
-          {
-            params: {
-              spreadsheetId: args.spreadsheet_id,
-              range: args.range,
-              valueInputOption: "USER_ENTERED",
-            },
-            jsonBody: {
-              values: args.values,
-            },
-          }
-        );
-      } catch (err) {
-        await rethrowWithTabContext(
-          client,
-          args.spreadsheet_id,
-          args.range as string,
-          err
-        );
-        throw err;
-      }
+      const result = await client.api(
+        "sheets",
+        "spreadsheets.values",
+        "update",
+        {
+          params: {
+            spreadsheetId: args.spreadsheet_id,
+            range: args.range,
+            valueInputOption: "USER_ENTERED",
+          },
+          jsonBody: {
+            values: args.values,
+          },
+        }
+      );
       return jsonResponse(result.data);
     }
 
     case "sheets_append": {
-      const range = (args.range as string) || "Sheet1!A1";
-      let result;
-      try {
-        result = await client.api(
-          "sheets",
-          "spreadsheets.values",
-          "append",
-          {
-            params: {
-              spreadsheetId: args.spreadsheet_id,
-              range,
-              valueInputOption: "USER_ENTERED",
-              insertDataOption: "INSERT_ROWS",
-            },
-            jsonBody: {
-              values: args.values,
-            },
-          }
-        );
-      } catch (err) {
-        await rethrowWithTabContext(client, args.spreadsheet_id, range, err);
-        throw err;
-      }
+      const range = (args.range as string) || APPEND_DEFAULT_RANGE;
+      const result = await client.api(
+        "sheets",
+        "spreadsheets.values",
+        "append",
+        {
+          params: {
+            spreadsheetId: args.spreadsheet_id,
+            range,
+            valueInputOption: "USER_ENTERED",
+            insertDataOption: "INSERT_ROWS",
+          },
+          jsonBody: {
+            values: args.values,
+          },
+        }
+      );
       return jsonResponse(result.data);
     }
 
@@ -367,11 +359,15 @@ export async function handleSheets(
       const props = data.replies?.[0]?.addSheet?.properties ?? {};
       if (args.headers) {
         const headers = args.headers as string[];
+        // RAW, not USER_ENTERED: headers are labels and must never be
+        // evaluated — "=Total" is a header, not a formula, and "1/2" is a
+        // name, not a date. (sheets_create's embedded stringValue headers
+        // have the same literal semantics.)
         await client.api("sheets", "spreadsheets.values", "update", {
           params: {
             spreadsheetId: args.spreadsheet_id,
             range: `${quoteTabForRange(title)}!A1`,
-            valueInputOption: "USER_ENTERED",
+            valueInputOption: "RAW",
           },
           jsonBody: { values: [headers] },
         });

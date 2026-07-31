@@ -23,29 +23,15 @@ function fakeClient(
   return { client: { api } as unknown as GwsClient, calls };
 }
 
-function payload(result: { content: { text: string }[] }): Record<string, unknown> {
-  return JSON.parse(result.content[0].text);
-}
-
 describe("tabNameFromRange", () => {
-  it("parses a bare tab prefix", () => {
-    expect(tabNameFromRange("Sheet1!A1:D10")).toBe("Sheet1");
-  });
-
-  it("parses a quoted tab with spaces", () => {
-    expect(tabNameFromRange("'MCP Inventory'!A1:B1")).toBe("MCP Inventory");
-  });
-
-  it("unescapes doubled quotes inside a quoted tab", () => {
-    expect(tabNameFromRange("'Bob''s Data'!A1")).toBe("Bob's Data");
-  });
-
-  it("returns undefined when the range has no tab prefix", () => {
-    expect(tabNameFromRange("A1:Z")).toBeUndefined();
-  });
-
-  it("returns undefined for an unterminated quoted prefix", () => {
-    expect(tabNameFromRange("'Broken!A1")).toBeUndefined();
+  it.each([
+    ["Sheet1!A1:D10", "Sheet1"],
+    ["'MCP Inventory'!A1:B1", "MCP Inventory"],
+    ["'Bob''s Data'!A1", "Bob's Data"],
+    ["A1:Z", undefined],
+    ["'Broken!A1", undefined],
+  ])("%s → %s", (range, expected) => {
+    expect(tabNameFromRange(range)).toBe(expected);
   });
 });
 
@@ -56,23 +42,21 @@ describe("quoteTabForRange", () => {
 });
 
 describe("sheets_add_tab", () => {
-  it("is registered as a non-destructive write with the expected inputs", () => {
+  it("requires spreadsheet_id and title", () => {
     const tool = sheetsTools.find((t) => t.name === "sheets_add_tab");
-    expect(tool).toBeDefined();
     expect(tool?.inputSchema.required).toEqual(["spreadsheet_id", "title"]);
-    expect(tool?.annotations).toEqual({
-      destructiveHint: false,
-      readOnlyHint: false,
-    });
   });
 
-  it("sheets_create is likewise a write that destroys nothing", () => {
-    const tool = sheetsTools.find((t) => t.name === "sheets_create");
-    expect(tool?.annotations).toEqual({
-      destructiveHint: false,
-      readOnlyHint: false,
-    });
-  });
+  it.each(["sheets_add_tab", "sheets_create"])(
+    "%s is a write that destroys nothing",
+    (name) => {
+      const tool = sheetsTools.find((t) => t.name === name);
+      expect(tool?.annotations).toEqual({
+        destructiveHint: false,
+        readOnlyHint: false,
+      });
+    }
+  );
 
   it("adds the tab via batchUpdate and returns the reply's sheetId", async () => {
     const { client, calls } = fakeClient([
@@ -98,11 +82,13 @@ describe("sheets_add_tab", () => {
       params: { spreadsheetId: "sheet-1" },
       jsonBody: { requests: [{ addSheet: { properties: { title: "Inventory" } } }] },
     });
-    // The API assigns an arbitrary id — nothing may assume 0 is "first".
-    expect(payload(result)).toEqual({ sheetId: 852183133, title: "Inventory" });
+    expect(JSON.parse(result.content[0].text)).toEqual({
+      sheetId: 852183133,
+      title: "Inventory",
+    });
   });
 
-  it("writes headers to row 1 of the new tab, range-quoted", async () => {
+  it("writes headers to row 1 of the new tab, range-quoted and RAW", async () => {
     const { client, calls } = fakeClient([
       { data: { replies: [{ addSheet: { properties: { sheetId: 7, title: "Q3 Data" } } }] } },
       { data: {} },
@@ -115,10 +101,11 @@ describe("sheets_add_tab", () => {
     });
 
     expect(calls).toHaveLength(2);
+    // RAW: headers are labels; "=Total" must land as text, not a formula.
     expect(calls[1]).toMatchObject({
       resource: "spreadsheets.values",
       method: "update",
-      params: { range: "'Q3 Data'!A1", valueInputOption: "USER_ENTERED" },
+      params: { range: "'Q3 Data'!A1", valueInputOption: "RAW" },
       jsonBody: { values: [["Name", "Owner"]] },
     });
   });
@@ -127,12 +114,12 @@ describe("sheets_add_tab", () => {
 describe("missing-tab error context", () => {
   const parseFailure =
     'API error: {"error":{"code":400,"message":"Unable to parse range: MCP Inventory!A1:B1","status":"INVALID_ARGUMENT"}}';
+  const twoTabs = {
+    data: { sheets: [{ properties: { title: "Sheet1" } }, { properties: { title: "Notes" } }] },
+  };
 
   it("names the missing tab and lists the ones that exist", async () => {
-    const { client } = fakeClient([
-      { throws: parseFailure },
-      { data: { sheets: [{ properties: { title: "Sheet1" } }, { properties: { title: "Notes" } }] } },
-    ]);
+    const { client } = fakeClient([{ throws: parseFailure }, twoTabs]);
 
     await expect(
       handleSheets(client, "sheets_update", {
@@ -146,61 +133,67 @@ describe("missing-tab error context", () => {
     );
   });
 
-  it("covers sheets_read and sheets_append the same way", async () => {
-    for (const [tool, args] of [
-      ["sheets_read", { spreadsheet_id: "s", range: "Ghost!A1" }],
-      ["sheets_append", { spreadsheet_id: "s", range: "Ghost!A1", values: [["x"]] }],
-    ] as const) {
-      const { client } = fakeClient([
-        { throws: "Unable to parse range: Ghost!A1" },
-        { data: { sheets: [{ properties: { title: "Sheet1" } }] } },
-      ]);
-      await expect(handleSheets(client, tool, { ...args })).rejects.toThrow(
-        'No sheet named "Ghost"'
+  it.each([
+    ["sheets_read", { spreadsheet_id: "s", range: "Ghost!A1" }],
+    ["sheets_append", { spreadsheet_id: "s", range: "Ghost!A1", values: [["x"]] }],
+  ])("enriches %s the same way", async (tool, args) => {
+    const { client } = fakeClient([
+      { throws: "Unable to parse range: Ghost!A1" },
+      { data: { sheets: [{ properties: { title: "Sheet1" } }] } },
+    ]);
+    await expect(handleSheets(client, tool, { ...args })).rejects.toThrow(
+      'No sheet named "Ghost"'
+    );
+  });
+
+  it("covers sheets_add_tab's own header write through the same seam", async () => {
+    const { client } = fakeClient([
+      { data: { replies: [{ addSheet: { properties: { sheetId: 7, title: "Ghost" } } }] } },
+      { throws: "Unable to parse range: 'Ghost'!A1" },
+      { data: { sheets: [{ properties: { title: "Sheet1" } }] } },
+    ]);
+
+    await expect(
+      handleSheets(client, "sheets_add_tab", {
+        spreadsheet_id: "s",
+        title: "Ghost",
+        headers: ["a"],
+      })
+    ).rejects.toThrow('No sheet named "Ghost"');
+  });
+
+  it.each([
+    [
+      "the named tab actually exists",
+      [
+        { throws: parseFailure },
+        { data: { sheets: [{ properties: { title: "MCP Inventory" } }] } },
+      ],
+      { spreadsheet_id: "s", range: "MCP Inventory!A1:B1", values: [["a"]] },
+      2,
+    ],
+    [
+      "the range has no tab prefix",
+      [{ throws: "Unable to parse range: A1:ZZZ99" }],
+      { spreadsheet_id: "s", range: "A1:ZZZ99", values: [["a"]] },
+      1,
+    ],
+    [
+      "the tab lookup itself fails",
+      [{ throws: parseFailure }, { throws: "API error: permission denied" }],
+      { spreadsheet_id: "s", range: "MCP Inventory!A1", values: [["a"]] },
+      2,
+    ],
+  ] as const)(
+    "keeps the original error when %s",
+    async (_case, plan, args, expectedCalls) => {
+      const { client, calls } = fakeClient([...plan]);
+      await expect(handleSheets(client, "sheets_update", { ...args })).rejects.toThrow(
+        "Unable to parse range"
       );
+      expect(calls).toHaveLength(expectedCalls);
     }
-  });
-
-  it("keeps the original error when the named tab actually exists", async () => {
-    const { client } = fakeClient([
-      { throws: parseFailure },
-      { data: { sheets: [{ properties: { title: "MCP Inventory" } }] } },
-    ]);
-
-    await expect(
-      handleSheets(client, "sheets_update", {
-        spreadsheet_id: "s",
-        range: "MCP Inventory!A1:B1",
-        values: [["a"]],
-      })
-    ).rejects.toThrow("Unable to parse range");
-  });
-
-  it("keeps the original error when the range has no tab prefix", async () => {
-    const { client, calls } = fakeClient([
-      { throws: "Unable to parse range: A1:ZZZ99" },
-    ]);
-
-    await expect(
-      handleSheets(client, "sheets_read", { spreadsheet_id: "s", range: "A1:ZZZ99" })
-    ).rejects.toThrow("Unable to parse range");
-    expect(calls).toHaveLength(1); // no tab lookup attempted
-  });
-
-  it("keeps the original error when the tab lookup itself fails", async () => {
-    const { client } = fakeClient([
-      { throws: parseFailure },
-      { throws: "API error: permission denied" },
-    ]);
-
-    await expect(
-      handleSheets(client, "sheets_update", {
-        spreadsheet_id: "s",
-        range: "MCP Inventory!A1",
-        values: [["a"]],
-      })
-    ).rejects.toThrow("Unable to parse range");
-  });
+  );
 
   it("leaves unrelated errors untouched, without a tab lookup", async () => {
     const { client, calls } = fakeClient([
