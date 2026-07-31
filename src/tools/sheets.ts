@@ -101,7 +101,35 @@ export const sheetsTools = [
       },
       required: ["title"],
     },
-    annotations: { destructiveHint: true, readOnlyHint: false },
+    // A write, but not destructive: it creates a new file and cannot
+    // overwrite or remove existing data.
+    annotations: { destructiveHint: false, readOnlyHint: false },
+  },
+  {
+    name: "sheets_add_tab",
+    description:
+      "Add a new tab (sheet) to an existing Google Sheets spreadsheet. Use sheets_create to make a whole new spreadsheet file; use this to add a tab inside one. Returns the new tab's sheetId and title.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        spreadsheet_id: {
+          type: "string",
+          description: "The spreadsheet ID",
+        },
+        title: {
+          type: "string",
+          description: "Title for the new tab",
+        },
+        headers: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Optional header row values written to row 1 of the new tab, e.g., [\"Name\", \"Email\", \"Date\"]",
+        },
+      },
+      required: ["spreadsheet_id", "title"],
+    },
+    annotations: { destructiveHint: false, readOnlyHint: false },
   },
   {
     name: "sheets_delete",
@@ -121,6 +149,79 @@ export const sheetsTools = [
   },
 ];
 
+/* ----------------------- range / tab error helpers ------------------------ */
+
+/** The sheet-name prefix of an A1 range ("'Q3 Data'!A1:B2" → "Q3 Data",
+ * "Sheet1!A:A" → "Sheet1"), or undefined when the range has no tab prefix.
+ * A doubled single quote inside a quoted name is the A1 escape for one. */
+export function tabNameFromRange(range: string): string | undefined {
+  if (range.startsWith("'")) {
+    let i = 1;
+    let name = "";
+    while (i < range.length) {
+      if (range[i] === "'") {
+        if (range[i + 1] === "'") {
+          name += "'";
+          i += 2;
+          continue;
+        }
+        break;
+      }
+      name += range[i];
+      i += 1;
+    }
+    return range[i] === "'" && range[i + 1] === "!" ? name : undefined;
+  }
+  const bang = range.indexOf("!");
+  return bang > 0 ? range.slice(0, bang) : undefined;
+}
+
+/** A tab title as it must appear inside an A1 range: quoted, with internal
+ * single quotes doubled. */
+export function quoteTabForRange(title: string): string {
+  return `'${title.replace(/'/g, "''")}'`;
+}
+
+const UNPARSEABLE_RANGE = /unable to parse range/i;
+
+/** Google reports a range naming a missing tab as a SYNTAX error ("Unable to
+ * parse range: …"), which sends users off to rewrite perfectly valid A1
+ * notation. When the failed range names a tab, look up the spreadsheet's real
+ * tab list and say what is actually wrong — and if the named tab does exist
+ * (or the range has no tab prefix), the original error stands, because then
+ * the syntax genuinely is the problem. */
+async function rethrowWithTabContext(
+  client: GwsClient,
+  spreadsheetId: unknown,
+  range: string,
+  err: unknown
+): Promise<never> {
+  const message = err instanceof Error ? err.message : String(err);
+  if (!UNPARSEABLE_RANGE.test(message)) throw err;
+  const tab = tabNameFromRange(range);
+  if (!tab) throw err;
+  let titles: string[];
+  try {
+    const result = await client.api("sheets", "spreadsheets", "get", {
+      params: { spreadsheetId, fields: "sheets.properties.title" },
+    });
+    const data = result.data as {
+      sheets?: { properties?: { title?: string } }[];
+    };
+    titles = (data.sheets ?? [])
+      .map((s) => s.properties?.title)
+      .filter((t): t is string => typeof t === "string");
+  } catch {
+    throw err;
+  }
+  if (titles.includes(tab)) throw err;
+  throw new Error(
+    `No sheet named "${tab}" in this spreadsheet. Existing tabs: ` +
+      `${titles.map((t) => `"${t}"`).join(", ") || "(none)"}. ` +
+      `Create it first with sheets_add_tab.`
+  );
+}
+
 export async function handleSheets(
   client: GwsClient,
   toolName: string,
@@ -128,17 +229,28 @@ export async function handleSheets(
 ) {
   switch (toolName) {
     case "sheets_read": {
-      const result = await client.api(
-        "sheets",
-        "spreadsheets.values",
-        "get",
-        {
-          params: {
-            spreadsheetId: args.spreadsheet_id,
-            range: args.range,
-          },
-        }
-      );
+      let result;
+      try {
+        result = await client.api(
+          "sheets",
+          "spreadsheets.values",
+          "get",
+          {
+            params: {
+              spreadsheetId: args.spreadsheet_id,
+              range: args.range,
+            },
+          }
+        );
+      } catch (err) {
+        await rethrowWithTabContext(
+          client,
+          args.spreadsheet_id,
+          args.range as string,
+          err
+        );
+        throw err;
+      }
       const data = result.data as Record<string, unknown>;
       const values = (data.values as string[][] | undefined) || [];
       const columnCount = values.reduce((max, row) => Math.max(max, row.length), 0);
@@ -156,42 +268,59 @@ export async function handleSheets(
     }
 
     case "sheets_update": {
-      const result = await client.api(
-        "sheets",
-        "spreadsheets.values",
-        "update",
-        {
-          params: {
-            spreadsheetId: args.spreadsheet_id,
-            range: args.range,
-            valueInputOption: "USER_ENTERED",
-          },
-          jsonBody: {
-            values: args.values,
-          },
-        }
-      );
+      let result;
+      try {
+        result = await client.api(
+          "sheets",
+          "spreadsheets.values",
+          "update",
+          {
+            params: {
+              spreadsheetId: args.spreadsheet_id,
+              range: args.range,
+              valueInputOption: "USER_ENTERED",
+            },
+            jsonBody: {
+              values: args.values,
+            },
+          }
+        );
+      } catch (err) {
+        await rethrowWithTabContext(
+          client,
+          args.spreadsheet_id,
+          args.range as string,
+          err
+        );
+        throw err;
+      }
       return jsonResponse(result.data);
     }
 
     case "sheets_append": {
       const range = (args.range as string) || "Sheet1!A1";
-      const result = await client.api(
-        "sheets",
-        "spreadsheets.values",
-        "append",
-        {
-          params: {
-            spreadsheetId: args.spreadsheet_id,
-            range,
-            valueInputOption: "USER_ENTERED",
-            insertDataOption: "INSERT_ROWS",
-          },
-          jsonBody: {
-            values: args.values,
-          },
-        }
-      );
+      let result;
+      try {
+        result = await client.api(
+          "sheets",
+          "spreadsheets.values",
+          "append",
+          {
+            params: {
+              spreadsheetId: args.spreadsheet_id,
+              range,
+              valueInputOption: "USER_ENTERED",
+              insertDataOption: "INSERT_ROWS",
+            },
+            jsonBody: {
+              values: args.values,
+            },
+          }
+        );
+      } catch (err) {
+        await rethrowWithTabContext(client, args.spreadsheet_id, range, err);
+        throw err;
+      }
       return jsonResponse(result.data);
     }
 
@@ -219,6 +348,41 @@ export async function handleSheets(
         spreadsheetId: d.spreadsheetId,
         title: (d.properties as Record<string, unknown>)?.title,
         spreadsheetUrl: d.spreadsheetUrl,
+      });
+    }
+
+    case "sheets_add_tab": {
+      const title = args.title as string;
+      const result = await client.api("sheets", "spreadsheets", "batchUpdate", {
+        params: { spreadsheetId: args.spreadsheet_id },
+        jsonBody: {
+          requests: [{ addSheet: { properties: { title } } }],
+        },
+      });
+      const data = result.data as {
+        replies?: {
+          addSheet?: { properties?: { sheetId?: number; title?: string } };
+        }[];
+      };
+      const props = data.replies?.[0]?.addSheet?.properties ?? {};
+      if (args.headers) {
+        const headers = args.headers as string[];
+        await client.api("sheets", "spreadsheets.values", "update", {
+          params: {
+            spreadsheetId: args.spreadsheet_id,
+            range: `${quoteTabForRange(title)}!A1`,
+            valueInputOption: "USER_ENTERED",
+          },
+          jsonBody: { values: [headers] },
+        });
+      }
+      // sheetId is an arbitrary identifier, not a position: the default tab
+      // of a fresh spreadsheet is not necessarily id 0, so anything that
+      // addresses tabs by id must use the id returned here (or from
+      // spreadsheets.get) rather than assuming 0 means "first sheet".
+      return jsonResponse({
+        sheetId: props.sheetId,
+        title: props.title ?? title,
       });
     }
 
