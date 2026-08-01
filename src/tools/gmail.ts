@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import type { GwsClient } from "../gws-client.js";
-import { jsonResponse, stripHtml, truncate } from "./response.js";
+import { deleteResponse, jsonResponse, stripHtml, truncate } from "./response.js";
 
 // Shared to/subject/body/cc/bcc schema for gmail_send and the draft tools
 const emailFields = {
@@ -319,7 +319,7 @@ export const gmailTools: ToolDef[] = [
   {
     name: "gmail_create_label",
     description:
-      "Create a Gmail label. Nested labels use '/' in the name (e.g. 'Alerts/Nativo'). Returns the created label including its ID, which can be used with gmail_create_filter or gmail_mark_read. To list existing labels, use gws_run with resource users.labels.",
+      "Create a Gmail label. Nested labels use '/' in the name (e.g. 'Alerts/Invoices'). Returns the created label including its ID, which can be used with gmail_create_filter or gmail_label_message. Use gmail_list_labels to see existing labels.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -331,6 +331,97 @@ export const gmailTools: ToolDef[] = [
       required: ["name"],
     },
     annotations: CREATE("Create email label"),
+  },
+  {
+    name: "gmail_list_labels",
+    description:
+      "List every label in the mailbox, system and user-created, with each label's ID, name and type. Use this to find the label ID that gmail_label_message, gmail_create_filter, gmail_update_label and gmail_delete_label need.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {},
+    },
+    annotations: READ("List email labels"),
+  },
+  {
+    name: "gmail_update_label",
+    description:
+      "Rename an existing Gmail label, or change its visibility. Takes the label ID (from gmail_list_labels), not the label name. Renaming a label keeps it on every message already labelled with it.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        label_id: {
+          type: "string",
+          description: "The label ID to update (from gmail_list_labels)",
+        },
+        name: {
+          type: "string",
+          description: "New label name. Nested labels use '/' (e.g. 'Alerts/Invoices')",
+        },
+        label_list_visibility: {
+          type: "string",
+          description:
+            "Whether the label shows in the label list: labelShow, labelShowIfUnread, or labelHide",
+        },
+        message_list_visibility: {
+          type: "string",
+          description:
+            "Whether the label shows on messages in the message list: show or hide",
+        },
+      },
+      required: ["label_id"],
+    },
+    // Non-destructive by the same rule as sheets_rename_tab: it changes a
+    // label, not data. Messages keep the label; only its name or visibility
+    // moves.
+    annotations: CREATE("Rename an email label or change its visibility"),
+  },
+  {
+    name: "gmail_delete_label",
+    description:
+      "Delete a Gmail label. Takes the label ID (from gmail_list_labels), not the label name. This removes the label from every message that carries it; the messages themselves are not deleted. System labels (INBOX, UNREAD, SENT) cannot be deleted.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        label_id: {
+          type: "string",
+          description: "The label ID to delete (from gmail_list_labels)",
+        },
+      },
+      required: ["label_id"],
+    },
+    annotations: MUTATE("Delete email label and remove it from all mail"),
+  },
+  {
+    name: "gmail_label_message",
+    description:
+      "Add or remove labels on one or more messages. Removing the INBOX label archives a message; removing UNREAD marks it read. Label IDs come from gmail_list_labels. To only flip read state, gmail_mark_read is the narrower tool.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        message_id: {
+          type: "string",
+          description: "A single message ID to modify",
+        },
+        message_ids: {
+          type: "array",
+          items: { type: "string" },
+          description: "Several message IDs to modify in one call",
+        },
+        add_labels: {
+          type: "array",
+          items: { type: "string" },
+          description: "Label IDs to add, e.g. [\"Label_12\"]",
+        },
+        remove_labels: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Label IDs to remove, e.g. [\"INBOX\"] to archive or [\"UNREAD\"] to mark read",
+        },
+      },
+      required: [],
+    },
+    annotations: MUTATE("Add or remove labels on email"),
   },
   {
     name: "gmail_save_attachment_to_drive",
@@ -497,6 +588,57 @@ async function fetchMessageList(
   return jsonResponse(
     details.map((d) => flattenMessage(d.data as GmailMessage))
   );
+}
+
+/** A Gmail label as the API returns it. */
+export interface GmailLabel {
+  id: string;
+  name: string;
+  type?: string;
+}
+
+/** Find a label by its display name. Used to recover the label a create call
+ * made when the API answers with an empty body. */
+async function findLabelByName(
+  client: GwsClient,
+  name: string
+): Promise<GmailLabel | undefined> {
+  const result = await client.api("gmail", "users.labels", "list", {
+    params: { userId: "me" },
+  });
+  const data = result.data as { labels?: GmailLabel[] } | undefined;
+  return (data?.labels ?? []).find((label) => label.name === name);
+}
+
+/** Apply a label modification to one message or a batch of them. Shared by
+ * gmail_mark_read and gmail_label_message, which build different bodies (see
+ * their cases) but issue the same call. */
+async function modifyMessageLabels(
+  client: GwsClient,
+  args: Record<string, unknown>,
+  body: Record<string, unknown>
+) {
+  const ids = args.message_ids as string[] | undefined;
+  if (ids?.length) {
+    // batchModify returns an empty body on success
+    await client.api("gmail", "users.messages", "batchModify", {
+      params: { userId: "me" },
+      jsonBody: { ids, ...body },
+    });
+    return jsonResponse({ modified: ids.length, ids, ...body });
+  }
+
+  if (!args.message_id) {
+    throw new Error("Provide either message_id or message_ids");
+  }
+  const result = await client.api("gmail", "users.messages", "modify", {
+    params: { userId: "me", id: args.message_id },
+    jsonBody: body,
+  });
+  const data = result.data as { id?: string } | undefined;
+  // modify can also answer with an empty body; say what was applied rather
+  // than returning nothing.
+  return jsonResponse(data?.id ? data : { id: args.message_id, ...body });
 }
 
 export async function handleGmail(
@@ -673,26 +815,24 @@ export async function handleGmail(
       const removeLabels = args.remove_labels as string[] | undefined;
       const body: Record<string, unknown> = {};
       if (addLabels?.length) body.addLabelIds = addLabels;
+      // The read-state tool's default: with nothing specified, mark read.
       body.removeLabelIds = removeLabels?.length ? removeLabels : ["UNREAD"];
+      return modifyMessageLabels(client, args, body);
+    }
 
-      const ids = args.message_ids as string[] | undefined;
-      if (ids?.length) {
-        // batchModify returns an empty body on success
-        await client.api("gmail", "users.messages", "batchModify", {
-          params: { userId: "me" },
-          jsonBody: { ids, ...body },
-        });
-        return jsonResponse({ modified: ids.length, ids, ...body });
+    case "gmail_label_message": {
+      const addLabels = args.add_labels as string[] | undefined;
+      const removeLabels = args.remove_labels as string[] | undefined;
+      // No default here on purpose: this tool exists to change labels, and
+      // silently marking mail read because the caller named no labels would
+      // be a side effect nobody asked for.
+      if (!addLabels?.length && !removeLabels?.length) {
+        throw new Error("Provide add_labels, remove_labels, or both");
       }
-
-      if (!args.message_id) {
-        throw new Error("Provide either message_id or message_ids");
-      }
-      const result = await client.api("gmail", "users.messages", "modify", {
-        params: { userId: "me", id: args.message_id },
-        jsonBody: body,
-      });
-      return jsonResponse(result.data);
+      const body: Record<string, unknown> = {};
+      if (addLabels?.length) body.addLabelIds = addLabels;
+      if (removeLabels?.length) body.removeLabelIds = removeLabels;
+      return modifyMessageLabels(client, args, body);
     }
 
     case "gmail_list_filters": {
@@ -747,7 +887,62 @@ export async function handleGmail(
         params: { userId: "me" },
         jsonBody: { name: args.name },
       });
-      return jsonResponse(result.data);
+      // The label is created, but this call can come back with an empty
+      // body, which used to be returned verbatim: the tool promised "the
+      // created label including its ID" and handed back nothing, breaking
+      // the documented create -> filter chain with no way to recover the id
+      // short of listing labels by hand. When the id is missing, look it up.
+      const created = result.data as { id?: string } | undefined;
+      if (created?.id) return jsonResponse(created);
+      const label = await findLabelByName(client, args.name as string);
+      if (!label) {
+        throw new Error(
+          `Label "${args.name}" was created but could not be read back. ` +
+            `Use gmail_list_labels to find its ID.`
+        );
+      }
+      return jsonResponse(label);
+    }
+
+    case "gmail_list_labels": {
+      const result = await client.api("gmail", "users.labels", "list", {
+        params: { userId: "me" },
+      });
+      const data = result.data as { labels?: GmailLabel[] } | undefined;
+      const labels = data?.labels ?? [];
+      return jsonResponse({ count: labels.length, labels });
+    }
+
+    case "gmail_update_label": {
+      const body: Record<string, unknown> = {};
+      if (args.name !== undefined) body.name = args.name;
+      if (args.label_list_visibility !== undefined) {
+        body.labelListVisibility = args.label_list_visibility;
+      }
+      if (args.message_list_visibility !== undefined) {
+        body.messageListVisibility = args.message_list_visibility;
+      }
+      if (Object.keys(body).length === 0) {
+        throw new Error(
+          "Provide at least one of name, label_list_visibility or message_list_visibility"
+        );
+      }
+      const result = await client.api("gmail", "users.labels", "patch", {
+        params: { userId: "me", id: args.label_id },
+        jsonBody: body,
+      });
+      const updated = result.data as { id?: string } | undefined;
+      if (updated?.id) return jsonResponse(updated);
+      // Same empty-body shape as create: report what was asked for rather
+      // than an empty success.
+      return jsonResponse({ id: args.label_id, ...body });
+    }
+
+    case "gmail_delete_label": {
+      await client.api("gmail", "users.labels", "delete", {
+        params: { userId: "me", id: args.label_id },
+      });
+      return deleteResponse(`Label ${args.label_id}`);
     }
 
     default:

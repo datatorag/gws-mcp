@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { GwsClient } from "../gws-client.js";
-import { CREATE } from "./annotations.js";
+import { CREATE, MUTATE } from "./annotations.js";
 import {
   handleSheets,
   quoteTabForRange,
@@ -209,5 +209,112 @@ describe("missing-tab error context", () => {
       handleSheets(client, "sheets_read", { spreadsheet_id: "s", range: "Sheet1!A1" })
     ).rejects.toThrow("rate limit exceeded");
     expect(calls).toHaveLength(1);
+  });
+});
+
+describe("tab lifecycle", () => {
+  const twoTabs = {
+    data: {
+      sheets: [
+        { properties: { sheetId: 0, title: "Sheet1" } },
+        { properties: { sheetId: 852183133, title: "Inventory" } },
+      ],
+    },
+  };
+
+  it("renames by title, resolving the sheetId itself", async () => {
+    const { client, calls } = fakeClient([twoTabs, { data: {} }]);
+
+    const result = await handleSheets(client, "sheets_rename_tab", {
+      spreadsheet_id: "s",
+      title: "Inventory",
+      new_title: "Vendors",
+    });
+
+    expect(calls[1]).toMatchObject({
+      method: "batchUpdate",
+      jsonBody: {
+        requests: [
+          {
+            updateSheetProperties: {
+              properties: { sheetId: 852183133, title: "Vendors" },
+              fields: "title",
+            },
+          },
+        ],
+      },
+    });
+    expect(JSON.parse(result.content[0].text)).toEqual({
+      sheetId: 852183133,
+      title: "Vendors",
+      previousTitle: "Inventory",
+    });
+  });
+
+  it("deletes a tab by title", async () => {
+    const { client, calls } = fakeClient([twoTabs, { data: {} }]);
+
+    await handleSheets(client, "sheets_delete_tab", {
+      spreadsheet_id: "s",
+      title: "Inventory",
+    });
+
+    expect(calls[1]).toMatchObject({
+      method: "batchUpdate",
+      jsonBody: { requests: [{ deleteSheet: { sheetId: 852183133 } }] },
+    });
+  });
+
+  it.each(["sheets_rename_tab", "sheets_delete_tab"])(
+    "%s names the real tabs when the title does not exist",
+    async (tool) => {
+      const { client } = fakeClient([twoTabs]);
+      await expect(
+        handleSheets(client, tool, {
+          spreadsheet_id: "s",
+          title: "Ghost",
+          new_title: "x",
+        })
+      ).rejects.toThrow(
+        'No sheet named "Ghost" in this spreadsheet. Existing tabs: "Sheet1", "Inventory".'
+      );
+    }
+  );
+
+  it("clears values without touching the tab", async () => {
+    const { client, calls } = fakeClient([
+      { data: { clearedRange: "Inventory!A1:D50" } },
+    ]);
+
+    const result = await handleSheets(client, "sheets_clear", {
+      spreadsheet_id: "s",
+      range: "Inventory",
+    });
+
+    expect(calls[0]).toMatchObject({
+      resource: "spreadsheets.values",
+      method: "clear",
+      params: { range: "Inventory" },
+    });
+    expect(JSON.parse(result.content[0].text)).toEqual({
+      clearedRange: "Inventory!A1:D50",
+    });
+  });
+
+  it("titles the destructive tab tool so a prompt cannot be misread", () => {
+    // Read alone in a confirmation dialog by someone who thinks they are
+    // closing a view, this has to say that rows are going away.
+    const del = sheetsTools.find((t) => t.name === "sheets_delete_tab");
+    expect(del?.annotations).toEqual(
+      MUTATE("Delete a spreadsheet tab and all its rows")
+    );
+    // Its non-destructive neighbour, so clearing is the obvious choice for
+    // "empty this" rather than deleting the tab.
+    const clear = sheetsTools.find((t) => t.name === "sheets_clear");
+    expect(clear?.annotations).toEqual(
+      MUTATE("Erase the values in a spreadsheet range")
+    );
+    const rename = sheetsTools.find((t) => t.name === "sheets_rename_tab");
+    expect(rename?.annotations).toEqual(CREATE("Rename a spreadsheet tab"));
   });
 });

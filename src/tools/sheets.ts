@@ -133,6 +133,76 @@ export const sheetsTools: ToolDef[] = [
     annotations: CREATE("Add spreadsheet tab"),
   },
   {
+    name: "sheets_rename_tab",
+    description:
+      "Rename a tab (sheet) inside a Google Sheets spreadsheet. Takes the tab's current title, not its sheetId. Renaming changes only the label: every row, formula and value in the tab is untouched. Ranges that name the old title will stop resolving, so update any saved ranges afterwards.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        spreadsheet_id: {
+          type: "string",
+          description: "The spreadsheet ID",
+        },
+        title: {
+          type: "string",
+          description: "Current title of the tab to rename",
+        },
+        new_title: {
+          type: "string",
+          description: "New title for the tab",
+        },
+      },
+      required: ["spreadsheet_id", "title", "new_title"],
+    },
+    // Changes a label, destroys no data.
+    annotations: CREATE("Rename a spreadsheet tab"),
+  },
+  {
+    name: "sheets_clear",
+    description:
+      "Clear the values in a range, leaving the tab and its formatting in place. This is the non-destructive way to empty a tab or a block of cells — use it instead of deleting and recreating a tab, which throws away the tab's structure along with its data.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        spreadsheet_id: {
+          type: "string",
+          description: "The spreadsheet ID",
+        },
+        range: {
+          type: "string",
+          description:
+            "Range to clear in A1 notation. A bare tab name clears the whole tab (e.g. \"Inventory\"), or clear a block with \"Inventory!A2:D\"",
+        },
+      },
+      required: ["spreadsheet_id", "range"],
+    },
+    // Removes values that already exist, so it prompts — but it is the
+    // gentler neighbour of sheets_delete_tab and should be preferred.
+    annotations: MUTATE("Erase the values in a spreadsheet range"),
+  },
+  {
+    name: "sheets_delete_tab",
+    description:
+      "Delete a tab (sheet) and everything in it from a spreadsheet. Takes the tab's current title. THIS DESTROYS EVERY ROW IN THE TAB and cannot be undone through the API. To empty a tab without losing it, use sheets_clear instead. To delete the whole spreadsheet file, use sheets_delete.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        spreadsheet_id: {
+          type: "string",
+          description: "The spreadsheet ID",
+        },
+        title: {
+          type: "string",
+          description: "Title of the tab to delete, with all of its rows",
+        },
+      },
+      required: ["spreadsheet_id", "title"],
+    },
+    // The title has to survive being read alone in a confirmation dialog by
+    // someone who thinks they are closing a view.
+    annotations: MUTATE("Delete a spreadsheet tab and all its rows"),
+  },
+  {
     name: "sheets_delete",
     description:
       "Delete a Google Sheets spreadsheet. This permanently removes the file from Drive.",
@@ -209,6 +279,38 @@ async function rethrowWithTabContext(
       `${titles.map((t) => `"${t}"`).join(", ") || "(none)"}. ` +
       `Create it first with sheets_add_tab.`
   );
+}
+
+/** Resolve a tab title to the sheetId the batchUpdate API needs.
+ *
+ * Callers address tabs the way people do — by title — because a sheetId is
+ * an arbitrary identifier nobody has to hand (and, as sheets_add_tab's
+ * comment notes, the first tab is not id 0). A title that does not exist
+ * fails with the same list-the-real-tabs message the range path gives,
+ * rather than an API error about a sheetId the caller never supplied. */
+async function resolveSheetId(
+  client: GwsClient,
+  spreadsheetId: unknown,
+  title: string
+): Promise<number> {
+  const result = await client.api("sheets", "spreadsheets", "get", {
+    params: { spreadsheetId, fields: "sheets.properties(sheetId,title)" },
+  });
+  const data = result.data as {
+    sheets?: { properties?: { sheetId?: number; title?: string } }[];
+  };
+  const props = (data.sheets ?? []).map((sheet) => sheet.properties ?? {});
+  const match = props.find((p) => p.title === title);
+  if (match?.sheetId === undefined) {
+    const titles = props
+      .map((p) => p.title)
+      .filter((t): t is string => typeof t === "string");
+    throw new Error(
+      `No sheet named "${title}" in this spreadsheet. Existing tabs: ` +
+        `${titles.map((t) => `"${t}"`).join(", ") || "(none)"}.`
+    );
+  }
+  return match.sheetId;
 }
 
 const APPEND_DEFAULT_RANGE = "Sheet1!A1";
@@ -381,6 +483,58 @@ async function dispatchSheets(
         sheetId: props.sheetId,
         title: props.title ?? title,
       });
+    }
+
+    case "sheets_rename_tab": {
+      const sheetId = await resolveSheetId(
+        client,
+        args.spreadsheet_id,
+        args.title as string
+      );
+      await client.api("sheets", "spreadsheets", "batchUpdate", {
+        params: { spreadsheetId: args.spreadsheet_id },
+        jsonBody: {
+          requests: [
+            {
+              updateSheetProperties: {
+                properties: { sheetId, title: args.new_title },
+                fields: "title",
+              },
+            },
+          ],
+        },
+      });
+      return jsonResponse({
+        sheetId,
+        title: args.new_title,
+        previousTitle: args.title,
+      });
+    }
+
+    case "sheets_clear": {
+      const result = await client.api("sheets", "spreadsheets.values", "clear", {
+        params: {
+          spreadsheetId: args.spreadsheet_id,
+          range: args.range,
+        },
+      });
+      const data = result.data as { clearedRange?: string } | undefined;
+      return jsonResponse({
+        clearedRange: data?.clearedRange ?? args.range,
+      });
+    }
+
+    case "sheets_delete_tab": {
+      const sheetId = await resolveSheetId(
+        client,
+        args.spreadsheet_id,
+        args.title as string
+      );
+      await client.api("sheets", "spreadsheets", "batchUpdate", {
+        params: { spreadsheetId: args.spreadsheet_id },
+        jsonBody: { requests: [{ deleteSheet: { sheetId } }] },
+      });
+      return deleteResponse(`Tab "${args.title}"`);
     }
 
     case "sheets_delete": {
