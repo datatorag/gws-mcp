@@ -2,7 +2,7 @@
 
 ## Project
 
-Google Workspace MCP extension for Claude. Wraps the `gws` CLI binary to expose 54 tools (Gmail, Calendar, Drive, Contacts, Sheets, Docs, Slides, Tasks, generic API access) via MCP.
+Google Workspace MCP extension for Claude. Wraps the `gws` CLI binary to expose 55 tools (Gmail, Calendar, Drive, Contacts, Sheets, Docs, Slides, Tasks, generic API access) via MCP.
 
 ## Commands
 
@@ -26,7 +26,33 @@ Two entry points sharing `createMcpServer()` from `create-server.ts`:
 - TypeScript strict mode, target ES2024, NodeNext module resolution
 - Output dir is `server/` (not `dist/`)
 - Use `pnpm`, not `npm`
-- No test framework currently
+- Tests: `pnpm test` (vitest — typechecks the test files, then runs them).
+  Unit tests live beside the module and drive handlers through a fake
+  `{ api }` client, so they need no network. They cannot catch a changed
+  upstream response shape: a live smoke test against the real API is still
+  the verification for anything touching a Google endpoint.
+
+## Tool annotations
+
+Every tool declares `annotations` via a preset from `src/tools/annotations.ts`,
+never hand-written booleans — the three shapes were copied out 55 times and
+eight had drifted to wrong values:
+
+- `READ(title)` — cannot modify anything. Reads, searches, lists, gets.
+- `CREATE(title)` — adds something new; cannot overwrite or destroy.
+- `MUTATE(title)` — overwrites or removes existing state, or has an
+  irreversible effect outside our system (sending mail, sharing a file).
+
+`MUTATE` is the safe default when unsure: over-prompting costs a click,
+under-prompting costs the user something they cannot get back. `ToolDef`
+makes `annotations` and both hints required, so an unannotated tool is a
+compile error rather than a silent one (under MCP defaults an absent
+`destructiveHint` reads as TRUE and an absent `readOnlyHint` as FALSE).
+
+The `title` is what a user reads in a confirmation prompt, so it must say
+what will actually happen — that is consent, not copy. "Insert text into
+document", not "Write document content"; "Run any Google Workspace API call
+(fallback)", not "Run Google Workspace API call".
 
 ## Extension packaging
 

@@ -1,7 +1,8 @@
 import type { GwsClient } from "../gws-client.js";
+import { CREATE, MUTATE, READ, ToolDef } from "./annotations.js";
 import { jsonResponse, deleteResponse, deleteDriveFile } from "./response.js";
 
-export const docsTools = [
+export const docsTools: ToolDef[] = [
   {
     name: "docs_get",
     description:
@@ -22,7 +23,7 @@ export const docsTools = [
       },
       required: ["document_id"],
     },
-    annotations: { title: "Read document", readOnlyHint: true, destructiveHint: false },
+    annotations: READ("Read document"),
   },
   {
     name: "docs_write",
@@ -42,7 +43,7 @@ export const docsTools = [
       },
       required: ["document_id", "text"],
     },
-    annotations: { title: "Write document content", readOnlyHint: false, destructiveHint: true },
+    annotations: MUTATE("Insert text into document"),
   },
   {
     name: "docs_batch_update",
@@ -64,7 +65,7 @@ export const docsTools = [
       },
       required: ["document_id", "requests"],
     },
-    annotations: { title: "Edit document", readOnlyHint: false, destructiveHint: true },
+    annotations: MUTATE("Edit document"),
   },
   {
     name: "docs_create",
@@ -79,7 +80,7 @@ export const docsTools = [
       },
       required: ["title"],
     },
-    annotations: { title: "Create document", readOnlyHint: false, destructiveHint: false },
+    annotations: CREATE("Create document"),
   },
   {
     name: "docs_delete",
@@ -95,7 +96,7 @@ export const docsTools = [
       },
       required: ["document_id"],
     },
-    annotations: { title: "Delete document", readOnlyHint: false, destructiveHint: true },
+    annotations: MUTATE("Delete document"),
   },
 ];
 

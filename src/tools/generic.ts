@@ -1,7 +1,8 @@
 import type { GwsClient } from "../gws-client.js";
+import { MUTATE, ToolDef } from "./annotations.js";
 import { jsonResponse } from "./response.js";
 
-export const genericTools = [
+export const genericTools: ToolDef[] = [
   {
     name: "gws_run",
     description:
@@ -48,7 +49,7 @@ export const genericTools = [
       },
       required: ["service", "resource", "method"],
     },
-    annotations: { title: "Run Google Workspace API call", readOnlyHint: false, destructiveHint: true },
+    annotations: MUTATE("Run any Google Workspace API call (fallback)"),
   },
 ];
 

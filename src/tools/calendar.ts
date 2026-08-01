@@ -1,4 +1,5 @@
 import type { GwsClient } from "../gws-client.js";
+import { CREATE, MUTATE, READ, ToolDef } from "./annotations.js";
 import {
   jsonResponse,
   deleteResponse,
@@ -113,7 +114,7 @@ function compactEvent(event: RawEvent, maxDescriptionChars: number) {
   return out;
 }
 
-export const calendarTools = [
+export const calendarTools: ToolDef[] = [
   {
     name: "calendar_list_events",
     description:
@@ -157,7 +158,7 @@ export const calendarTools = [
       },
       required: [] as string[],
     },
-    annotations: { title: "List calendar events", readOnlyHint: true, destructiveHint: false },
+    annotations: READ("List calendar events"),
   },
   {
     name: "calendar_get_event",
@@ -182,7 +183,7 @@ export const calendarTools = [
       },
       required: ["event_id"],
     },
-    annotations: { title: "Get calendar event", readOnlyHint: true, destructiveHint: false },
+    annotations: READ("Get calendar event"),
   },
   {
     name: "calendar_create_event",
@@ -236,7 +237,7 @@ export const calendarTools = [
       },
       required: ["summary", "start", "end"],
     },
-    annotations: { title: "Create calendar event", readOnlyHint: false, destructiveHint: false },
+    annotations: CREATE("Create calendar event"),
   },
   {
     name: "calendar_update_event",
@@ -285,7 +286,7 @@ export const calendarTools = [
       },
       required: ["event_id"],
     },
-    annotations: { title: "Update calendar event", readOnlyHint: false, destructiveHint: true },
+    annotations: MUTATE("Update calendar event"),
   },
   {
     name: "calendar_delete_event",
@@ -310,7 +311,7 @@ export const calendarTools = [
       },
       required: ["event_id"],
     },
-    annotations: { title: "Delete calendar event", readOnlyHint: false, destructiveHint: true },
+    annotations: MUTATE("Delete calendar event"),
   },
   {
     name: "calendar_freebusy",
@@ -335,7 +336,7 @@ export const calendarTools = [
       },
       required: ["time_min", "time_max", "emails"],
     },
-    annotations: { title: "Check calendar availability", readOnlyHint: true, destructiveHint: false },
+    annotations: READ("Check calendar availability"),
   },
 ];
 

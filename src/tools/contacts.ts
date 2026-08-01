@@ -1,7 +1,8 @@
 import type { GwsClient } from "../gws-client.js";
+import { CREATE, MUTATE, READ, ToolDef } from "./annotations.js";
 import { jsonResponse, deleteResponse } from "./response.js";
 
-export const contactsTools = [
+export const contactsTools: ToolDef[] = [
   {
     name: "contacts_search",
     description:
@@ -21,7 +22,7 @@ export const contactsTools = [
       },
       required: ["query"],
     },
-    annotations: { title: "Search contacts", readOnlyHint: true, destructiveHint: false },
+    annotations: READ("Search contacts"),
   },
   {
     name: "contacts_get",
@@ -38,7 +39,7 @@ export const contactsTools = [
       },
       required: ["resource_name"],
     },
-    annotations: { title: "Get contact", readOnlyHint: true, destructiveHint: false },
+    annotations: READ("Get contact"),
   },
   {
     name: "contacts_list",
@@ -54,7 +55,7 @@ export const contactsTools = [
       },
       required: [] as string[],
     },
-    annotations: { title: "List contacts", readOnlyHint: true, destructiveHint: false },
+    annotations: READ("List contacts"),
   },
   {
     name: "contacts_create",
@@ -89,7 +90,7 @@ export const contactsTools = [
       },
       required: ["name"],
     },
-    annotations: { title: "Create contact", readOnlyHint: false, destructiveHint: false },
+    annotations: CREATE("Create contact"),
   },
   {
     name: "contacts_update",
@@ -130,7 +131,7 @@ export const contactsTools = [
       },
       required: ["resource_name"],
     },
-    annotations: { title: "Update contact", readOnlyHint: false, destructiveHint: true },
+    annotations: MUTATE("Update contact"),
   },
   {
     name: "contacts_delete",
@@ -146,7 +147,7 @@ export const contactsTools = [
       },
       required: ["resource_name"],
     },
-    annotations: { title: "Delete contact", readOnlyHint: false, destructiveHint: true },
+    annotations: MUTATE("Delete contact"),
   },
   {
     name: "contacts_directory_search",
@@ -166,7 +167,7 @@ export const contactsTools = [
       },
       required: ["query"],
     },
-    annotations: { title: "Search company directory", readOnlyHint: true, destructiveHint: false },
+    annotations: READ("Search company directory"),
   },
 ];
 

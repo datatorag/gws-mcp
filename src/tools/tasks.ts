@@ -1,7 +1,8 @@
 import type { GwsClient } from "../gws-client.js";
+import { CREATE, MUTATE, READ, ToolDef } from "./annotations.js";
 import { jsonResponse, deleteResponse } from "./response.js";
 
-export const tasksTools = [
+export const tasksTools: ToolDef[] = [
   {
     name: "tasks_list",
     description: "List all task lists for the authenticated user.",
@@ -9,7 +10,7 @@ export const tasksTools = [
       type: "object" as const,
       properties: {},
     },
-    annotations: { title: "List task lists", readOnlyHint: true, destructiveHint: false },
+    annotations: READ("List task lists"),
   },
   {
     name: "tasks_list_tasks",
@@ -34,7 +35,7 @@ export const tasksTools = [
       },
       required: ["tasklist_id"],
     },
-    annotations: { title: "List tasks", readOnlyHint: true, destructiveHint: false },
+    annotations: READ("List tasks"),
   },
   {
     name: "tasks_create",
@@ -61,7 +62,7 @@ export const tasksTools = [
       },
       required: ["tasklist_id", "title"],
     },
-    annotations: { title: "Create task", readOnlyHint: false, destructiveHint: false },
+    annotations: CREATE("Create task"),
   },
   {
     name: "tasks_update",
@@ -92,7 +93,7 @@ export const tasksTools = [
       },
       required: ["tasklist_id", "task_id"],
     },
-    annotations: { title: "Update task", readOnlyHint: false, destructiveHint: true },
+    annotations: MUTATE("Update task"),
   },
   {
     name: "tasks_complete",
@@ -111,7 +112,7 @@ export const tasksTools = [
       },
       required: ["tasklist_id", "task_id"],
     },
-    annotations: { title: "Complete task", readOnlyHint: false, destructiveHint: true },
+    annotations: MUTATE("Complete task"),
   },
   {
     name: "tasks_delete",
@@ -130,7 +131,7 @@ export const tasksTools = [
       },
       required: ["tasklist_id", "task_id"],
     },
-    annotations: { title: "Delete task", readOnlyHint: false, destructiveHint: true },
+    annotations: MUTATE("Delete task"),
   },
 ];
 

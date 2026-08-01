@@ -1,8 +1,9 @@
 import { DEFAULT_SERVICES } from "../gws-client.js";
+import { CREATE, ToolDef } from "./annotations.js";
 import type { GwsClient } from "../gws-client.js";
 import { textResponse } from "./response.js";
 
-export const authTools = [
+export const authTools: ToolDef[] = [
   {
     name: "gws_auth_setup",
     description:
@@ -24,7 +25,7 @@ export const authTools = [
       },
       required: [] as string[],
     },
-    annotations: { title: "Set up Google authentication", readOnlyHint: false, destructiveHint: false },
+    annotations: CREATE("Check or change Google authentication"),
   },
 ];
 

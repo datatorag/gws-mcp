@@ -1,10 +1,11 @@
 import type { GwsClient } from "../gws-client.js";
+import { CREATE, READ, ToolDef } from "./annotations.js";
 import { jsonResponse, deleteDriveFile } from "./response.js";
 import { handleDocs } from "./docs.js";
 import { handleSheets } from "./sheets.js";
 import { handleSlides } from "./slides.js";
 
-export const driveTools = [
+export const driveTools: ToolDef[] = [
   {
     name: "drive_create_folder",
     description: "Create a new folder in Google Drive.",
@@ -22,7 +23,7 @@ export const driveTools = [
       },
       required: ["name"],
     },
-    annotations: { title: "Create Drive folder", readOnlyHint: false, destructiveHint: false },
+    annotations: CREATE("Create Drive folder"),
   },
   {
     name: "drive_search",
@@ -43,7 +44,7 @@ export const driveTools = [
       },
       required: ["query"],
     },
-    annotations: { title: "Search Drive files", readOnlyHint: true, destructiveHint: false },
+    annotations: READ("Search Drive files"),
   },
   {
     name: "drive_read_file",
@@ -59,7 +60,7 @@ export const driveTools = [
       },
       required: ["file_id"],
     },
-    annotations: { title: "Read Drive file", readOnlyHint: true, destructiveHint: false },
+    annotations: READ("Read Drive file"),
   },
 ];
 

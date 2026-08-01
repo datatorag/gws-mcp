@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { GwsClient } from "../gws-client.js";
+import { CREATE } from "./annotations.js";
 import {
   handleSheets,
   quoteTabForRange,
@@ -47,16 +48,20 @@ describe("sheets_add_tab", () => {
     expect(tool?.inputSchema.required).toEqual(["spreadsheet_id", "title"]);
   });
 
-  it.each(["sheets_add_tab", "sheets_create"])(
-    "%s is a write that destroys nothing",
-    (name) => {
-      const tool = sheetsTools.find((t) => t.name === name);
-      expect(tool?.annotations).toMatchObject({
-        destructiveHint: false,
-        readOnlyHint: false,
-      });
-    }
-  );
+  it("is a write that destroys nothing, pinned to the exact shape", () => {
+    // toEqual, not toMatchObject: an exact-shape assertion is the only place
+    // a stray or misspelled annotation key fails. Cross-tool coverage of the
+    // creation shape lives in annotations.test.ts; this pins the tool this
+    // file is about.
+    const tool = sheetsTools.find((t) => t.name === "sheets_add_tab");
+    expect(tool?.annotations).toEqual(CREATE("Add spreadsheet tab"));
+  });
+
+  it("sheets_create is likewise pinned: creating a file destroys nothing", () => {
+    const tool = sheetsTools.find((t) => t.name === "sheets_create");
+    expect(tool?.annotations).toEqual(CREATE("Create spreadsheet"));
+  });
+
 
   it("adds the tab via batchUpdate and returns the reply's sheetId", async () => {
     const { client, calls } = fakeClient([

@@ -1,7 +1,8 @@
 import type { GwsClient } from "../gws-client.js";
+import { CREATE, MUTATE, READ, ToolDef } from "./annotations.js";
 import { jsonResponse, deleteResponse, deleteDriveFile } from "./response.js";
 
-export const slidesTools = [
+export const slidesTools: ToolDef[] = [
   {
     name: "slides_get",
     description:
@@ -16,7 +17,7 @@ export const slidesTools = [
       },
       required: ["presentation_id"],
     },
-    annotations: { title: "Read presentation", readOnlyHint: true, destructiveHint: false },
+    annotations: READ("Read presentation"),
   },
   {
     name: "slides_create",
@@ -32,7 +33,7 @@ export const slidesTools = [
       },
       required: ["title"],
     },
-    annotations: { title: "Create presentation", readOnlyHint: false, destructiveHint: false },
+    annotations: CREATE("Create presentation"),
   },
   {
     name: "slides_batch_update",
@@ -54,7 +55,7 @@ export const slidesTools = [
       },
       required: ["presentation_id", "requests"],
     },
-    annotations: { title: "Edit presentation", readOnlyHint: false, destructiveHint: true },
+    annotations: MUTATE("Edit presentation"),
   },
   {
     name: "slides_delete",
@@ -70,7 +71,7 @@ export const slidesTools = [
       },
       required: ["presentation_id"],
     },
-    annotations: { title: "Delete presentation", readOnlyHint: false, destructiveHint: true },
+    annotations: MUTATE("Delete presentation"),
   },
 ];
 

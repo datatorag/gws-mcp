@@ -1,7 +1,8 @@
 import type { GwsClient } from "../gws-client.js";
+import { CREATE, MUTATE, READ, ToolDef } from "./annotations.js";
 import { jsonResponse, deleteResponse, deleteDriveFile } from "./response.js";
 
-export const sheetsTools = [
+export const sheetsTools: ToolDef[] = [
   {
     name: "sheets_read",
     description:
@@ -21,7 +22,7 @@ export const sheetsTools = [
       },
       required: ["spreadsheet_id", "range"],
     },
-    annotations: { title: "Read spreadsheet range", readOnlyHint: true, destructiveHint: false },
+    annotations: READ("Read spreadsheet range"),
   },
   {
     name: "sheets_update",
@@ -50,7 +51,7 @@ export const sheetsTools = [
       },
       required: ["spreadsheet_id", "range", "values"],
     },
-    annotations: { title: "Update spreadsheet cells", readOnlyHint: false, destructiveHint: true },
+    annotations: MUTATE("Update spreadsheet cells"),
   },
   {
     name: "sheets_append",
@@ -80,7 +81,7 @@ export const sheetsTools = [
       },
       required: ["spreadsheet_id", "values"],
     },
-    annotations: { title: "Append spreadsheet rows", readOnlyHint: false, destructiveHint: false },
+    annotations: CREATE("Append spreadsheet rows"),
   },
   {
     name: "sheets_create",
@@ -103,7 +104,7 @@ export const sheetsTools = [
     },
     // A write, but not destructive: it creates a new file and cannot
     // overwrite or remove existing data.
-    annotations: { title: "Create spreadsheet", readOnlyHint: false, destructiveHint: false },
+    annotations: CREATE("Create spreadsheet"),
   },
   {
     name: "sheets_add_tab",
@@ -129,7 +130,7 @@ export const sheetsTools = [
       },
       required: ["spreadsheet_id", "title"],
     },
-    annotations: { title: "Add spreadsheet tab", readOnlyHint: false, destructiveHint: false },
+    annotations: CREATE("Add spreadsheet tab"),
   },
   {
     name: "sheets_delete",
@@ -145,7 +146,7 @@ export const sheetsTools = [
       },
       required: ["spreadsheet_id"],
     },
-    annotations: { title: "Delete spreadsheet", readOnlyHint: false, destructiveHint: true },
+    annotations: MUTATE("Delete spreadsheet"),
   },
 ];
 
