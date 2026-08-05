@@ -2,7 +2,7 @@
 
 ## Project
 
-Google Workspace MCP extension for Claude. Wraps the `gws` CLI binary to expose 55 tools (Gmail, Calendar, Drive, Contacts, Sheets, Docs, Slides, Tasks, generic API access) via MCP.
+Google Workspace MCP extension for Claude. Wraps the `gws` CLI binary to expose 60 tools (Gmail, Calendar, Drive, Contacts, Sheets, Docs, Slides, Tasks, generic API access) via MCP.
 
 ## Commands
 

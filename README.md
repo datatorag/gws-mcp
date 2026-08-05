@@ -8,18 +8,18 @@ This server powers the Google Workspace connector of [DataToRAG](https://datator
 
 | Service | Tools | Operations |
 |---------|-------|------------|
-| **Gmail** | 16 | send, reply, forward, read, search, list, create draft, update draft, send draft, delete draft, mark read, list filters, create filter, delete filter, create label, save attachment to Drive |
+| **Gmail** | 18 | send, reply, forward, read, search, list, create draft, update draft, send draft, delete draft, mark read, list filters, create label, list labels, update label, delete label, label message, save attachment to Drive |
 | **Calendar** | 6 | list events, get event, create, update, delete, freebusy |
 | **Contacts** | 7 | search, get, list, create, update, delete, directory search |
 | **Drive** | 3 | search, read file, create folder |
-| **Sheets** | 5 | read, update, append, create, delete |
+| **Sheets** | 9 | read, update, append, create, delete, add tab, rename tab, delete tab, clear |
 | **Docs** | 5 | get, write, batch update, create, delete |
 | **Slides** | 4 | get, create, batch update, delete |
 | **Tasks** | 6 | list task lists, list tasks, create, update, complete, delete |
 | **Generic** | 1 | `gws_run` — fallback for any GWS API not covered above |
 | **Auth** | 1 | OAuth login and status |
 
-**54 tools total.** All tools support shared (team) Drives.
+**60 tools total.** All tools support shared (team) Drives.
 
 ### Key tool details
 
@@ -33,7 +33,16 @@ This server powers the Google Workspace connector of [DataToRAG](https://datator
 
 **gmail_mark_read** — Marks messages as read by removing the UNREAD label. Also supports adding/removing arbitrary labels (STARRED, IMPORTANT, etc.) via `add_labels` and `remove_labels` arrays. Pass `message_id` for a single message, or `message_ids` (up to 1000) to modify a batch in one API call via `users.messages.batchModify`. Removes UNREAD by default when no label arrays are given.
 
-**gmail_list_filters / gmail_create_filter / gmail_delete_filter / gmail_create_label** — Inbox automation: create filters that label, archive, mark-read, or forward matching mail, and create the labels they target. Filter tools need the `gmail.settings.basic` scope — existing installs must re-authenticate once (`gws_auth_setup` with action `login`) to pick it up. Gmail filters are immutable; "editing" one means create new + delete old.
+**gmail_list_filters** — Reads the filters a mailbox already has, so you can see
+what automation exists before adding more. Reading filters works under
+`gmail.modify`.
+
+Creating and deleting filters is **not currently exposed**. Google accepts only
+`gmail.settings.basic` on `users.settings.filters.create` and `.delete`, and
+`gmail.modify` does not carry it, so those calls fail with insufficient scopes
+regardless of what the caller does. Rather than ship two tools that can only
+fail, they are withheld until that scope is granted. Gmail filters are also
+immutable, so when they return, "editing" one means create new + delete old.
 
 **gmail_save_attachment_to_drive** — Fetches an attachment from Gmail and uploads it directly to Drive server-side. No base64 data flows through the conversation. Uses async file I/O with guaranteed temp file cleanup via try/finally.
 
