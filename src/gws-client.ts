@@ -47,7 +47,7 @@ const SERVICE_SCOPES: Record<string, string[]> = {
  * openid/userinfo.email itself). Returns undefined if any service is unknown,
  * so callers can fall back to the binary's own -s picker.
  */
-function scopesForServices(services: string): string[] | undefined {
+export function scopesForServices(services: string): string[] | undefined {
   const names = services.split(",").map((s) => s.trim()).filter(Boolean);
   const scopes = names.map((name) => SERVICE_SCOPES[name]);
   if (scopes.some((s) => s === undefined)) return undefined;

