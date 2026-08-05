@@ -2,6 +2,98 @@ import type { GwsClient } from "../gws-client.js";
 import { CREATE, MUTATE, READ, ToolDef } from "./annotations.js";
 import { jsonResponse, deleteResponse, deleteDriveFile } from "./response.js";
 
+/** Values whose first character makes Sheets treat the cell as a formula.
+ *
+ * Measured against the live API rather than taken from the CSV-injection
+ * folklore: `=1+1` and `+1+1` both evaluate; `-1-1`, `@SUM(1,2)` and a leading
+ * space did not. Widening to `-` would mangle every negative number, so the
+ * guard is these two.
+ *
+ * TWO LIMITS ON THAT MEASUREMENT, both worth knowing before trusting it:
+ *
+ * 1. `-` and `@` were probed with arithmetic, not with a network-reaching
+ *    function. If a future probe shows `-IMPORTXML(...)` evaluating, this list
+ *    is wrong and should widen.
+ * 2. It is about SHEETS. A sheet exported to CSV or XLSX and opened in Excel
+ *    or LibreOffice does execute `-` and `@` prefixes, so this guard does not
+ *    make an exported file safe.
+ */
+const FORMULA_PREFIXES = ["=", "+"];
+
+/** Sheets' own escape: a leading apostrophe forces the literal, and the
+ * apostrophe is not part of the stored value — a read gives back the original
+ * string. That is what makes this safe to apply by default rather than an
+ * edit the caller has to undo.
+ *
+ * Tested on the first VISIBLE character, not the raw first character, and the
+ * class is deliberately wider than the measurement.
+ *
+ * What was measured: a plain leading space is inert, and U+FEFF is NOT, a
+ * BOM-prefixed formula executes. U+FEFF is a format character (Cf), not
+ * Unicode whitespace, so that one result is evidence that Sheets skips
+ * leading zero-width characters before it parses. Matching only \s would
+ * catch U+FEFF by an ECMAScript accident (it folds the BOM into \s for
+ * historical reasons) while letting ZWSP, ZWNJ, ZWJ, WORD JOINER, SOFT
+ * HYPHEN and the bidi marks walk straight through.
+ *
+ * ZWSP and the rest were NOT re-measured against the live API. The class is
+ * wide on purpose: the escape is lossless, so a false positive costs one
+ * apostrophe that Sheets strips on read, and a false negative is an
+ * injection. When the cost is that asymmetric, guess wide. Cc is in for the
+ * same reason and on the same (absent) evidence — no real cell value starts
+ * with a control character, so including it costs nothing and excluding it
+ * would only be consistent with a narrower rule than the one above. */
+function escapeFormula(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const firstVisible = value.replace(/^[\s\p{Cf}\p{Zs}\p{Cc}]+/u, "");
+  return FORMULA_PREFIXES.some((p) => firstVisible.startsWith(p))
+    ? `'${value}`
+    : value;
+}
+
+/**
+ * Neutralise formula injection on the way in.
+ *
+ * An agent writing to a sheet is usually writing text it picked up somewhere
+ * else — an email, a shared doc, a web page — none of which the sheet's owner
+ * controls. Sheets formulas reach the network (`IMPORTXML`, `IMPORTDATA`,
+ * `IMAGE`), so a value that begins with `=` turns "log this message in my
+ * tracker" into an exfiltration primitive aimed at whatever that sheet can
+ * see. The caller never asked for a formula and, before this, had no way to
+ * decline one.
+ *
+ * Escaping rather than switching the whole write to RAW is deliberate. RAW
+ * stores every value as text, and its failure mode is silent: `=SUM()` over
+ * RAW-written numbers returns 0, not an error and not the total. Escaping
+ * blocks the same attack while numbers, dates and arithmetic keep working.
+ *
+ * SCOPE OF THE CLAIM, so nobody overstates it downstream: this escapes
+ * formula-prefixed values BY DEFAULT. It does not "prevent formula injection".
+ * `parse_formulas` is payload-wide rather than cell-scoped, so one legitimate
+ * formula in a call reopens every other cell in that same call — and the flag
+ * is set by an agent whose context may contain the attacker's text. The
+ * default path is safe; a caller that opts out is on its own.
+ */
+function guardValues(
+  values: unknown,
+  parseFormulas: unknown
+): unknown {
+  if (parseFormulas === true) return values;
+  if (!Array.isArray(values)) return values;
+  return values.map((row) =>
+    Array.isArray(row) ? row.map(escapeFormula) : escapeFormula(row)
+  );
+}
+
+/** Shared across the two tools that write caller-supplied cell values. */
+const parseFormulasParam = {
+  parse_formulas: {
+    type: "boolean",
+    description:
+      "Allow values to be stored as live formulas. Default false, which writes a leading = or + literally. Only set true when the caller explicitly asked for a formula — never for text taken from email, documents, or the web.",
+  },
+} as const;
+
 export const sheetsTools: ToolDef[] = [
   {
     name: "sheets_read",
@@ -48,6 +140,7 @@ export const sheetsTools: ToolDef[] = [
           description:
             "2D array of values to write (rows of columns), e.g., [[\"A1\",\"B1\"],[\"A2\",\"B2\"]]",
         },
+        ...parseFormulasParam,
       },
       required: ["spreadsheet_id", "range", "values"],
     },
@@ -78,6 +171,7 @@ export const sheetsTools: ToolDef[] = [
           description:
             "Target range for appending (default: first sheet). e.g., \"Sheet1!A1\"",
         },
+        ...parseFormulasParam,
       },
       required: ["spreadsheet_id", "values"],
     },
@@ -391,7 +485,7 @@ async function dispatchSheets(
             valueInputOption: "USER_ENTERED",
           },
           jsonBody: {
-            values: args.values,
+            values: guardValues(args.values, args.parse_formulas),
           },
         }
       );
@@ -412,7 +506,7 @@ async function dispatchSheets(
             insertDataOption: "INSERT_ROWS",
           },
           jsonBody: {
-            values: args.values,
+            values: guardValues(args.values, args.parse_formulas),
           },
         }
       );
