@@ -15,8 +15,14 @@ import { allTools } from "./tools/index.js";
  * they stay withheld until it is approved.
  *
  * This is a test rather than a comment because a comment only protects code
- * that somebody reads. Any branch reintroducing either half fails here, and
- * fails on the way into main.
+ * that somebody reads. Any branch reintroducing either half fails here.
+ *
+ * It does NOT fail "on the way into main" — an earlier version of this comment
+ * claimed that, and it was false. There is no CI in this repository: no
+ * workflows, no hooks, nothing that runs on push, PR or merge. This suite runs
+ * when a person or an agent types the command, so the guard protects a ritual
+ * rather than a pipeline. Worth knowing before relying on it, and worth fixing
+ * at the pipeline level rather than by trusting this sentence.
  */
 const WITHHELD_SCOPE = "https://www.googleapis.com/auth/gmail.settings.basic";
 const WITHHELD_TOOLS = ["gmail_create_filter", "gmail_delete_filter"];
