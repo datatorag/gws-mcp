@@ -111,6 +111,12 @@ export const sheetsTools: ToolDef[] = [
           description:
             "Cell range in A1 notation (e.g., \"Sheet1!A1:D10\", \"A1:Z\")",
         },
+        value_render_option: {
+          type: "string",
+          enum: ["FORMATTED_VALUE", "UNFORMATTED_VALUE", "FORMULA"],
+          description:
+            "How values are rendered. FORMATTED_VALUE (default) returns what the cell displays. UNFORMATTED_VALUE returns the underlying typed value, which is how you tell a stored number from stored text. FORMULA returns the cell's formula where it has one — the only way to tell a live formula from text that merely looks like one, so use it to verify a write.",
+        },
       },
       required: ["spreadsheet_id", "range"],
     },
@@ -454,6 +460,12 @@ async function dispatchSheets(
           params: {
             spreadsheetId: args.spreadsheet_id,
             range: args.range,
+            // Omitted entirely when unset: the API's own default is
+            // FORMATTED_VALUE, and sending it explicitly would be a second
+            // place for that default to drift from Google's.
+            ...(args.value_render_option
+              ? { valueRenderOption: args.value_render_option }
+              : {}),
           },
         }
       );

