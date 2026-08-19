@@ -495,6 +495,76 @@ describe("PIN: the default write path never evaluates caller text", () => {
   });
 });
 
+describe("value_input_option (SCRUM-121)", () => {
+  it.each([
+    ["sheets_update", { spreadsheet_id: "s", range: "A1" }],
+    ["sheets_append", { spreadsheet_id: "s" }],
+  ])("%s: naming USER_ENTERED is not an opt-out of the escape", async (tool, base) => {
+    const { client, calls } = fakeClient([{ data: {} }]);
+
+    await handleSheets(client, tool, {
+      ...base,
+      values: [["=1+1", "5"]],
+      value_input_option: "USER_ENTERED",
+    });
+
+    // The default is ESCAPED USER_ENTERED whether the caller writes the word
+    // or not. parse_formulas is the only door to evaluation.
+    expect(calls[0].params).toMatchObject({ valueInputOption: "USER_ENTERED" });
+    expect(calls[0].jsonBody).toEqual({ values: [["'=1+1", "5"]] });
+  });
+
+  it.each([
+    ["sheets_update", { spreadsheet_id: "s", range: "A1" }],
+    ["sheets_append", { spreadsheet_id: "s" }],
+  ])("%s: RAW passes values through verbatim, unescaped", async (tool, base) => {
+    const { client, calls } = fakeClient([{ data: {} }]);
+
+    await handleSheets(client, tool, {
+      ...base,
+      values: [["=1+1", "5"]],
+      value_input_option: "RAW",
+    });
+
+    // RAW stores exactly what it is sent: escaping here would embed the
+    // apostrophe as a permanent literal character, and RAW never evaluates
+    // anything anyway, so the value is already inert.
+    expect(calls[0].params).toMatchObject({ valueInputOption: "RAW" });
+    expect(calls[0].jsonBody).toEqual({ values: [["=1+1", "5"]] });
+  });
+
+  it("rejects RAW combined with parse_formulas instead of silently storing text", async () => {
+    const { client, calls } = fakeClient([{ data: {} }]);
+
+    await expect(
+      handleSheets(client, "sheets_update", {
+        spreadsheet_id: "s",
+        range: "A1",
+        values: [["=SUM(A1:B1)"]],
+        value_input_option: "RAW",
+        parse_formulas: true,
+      })
+    ).rejects.toThrow(/RAW never evaluates/);
+
+    // Failing loudly is the point: honouring both would write formula text
+    // that never runs while the call reports success.
+    expect(calls).toHaveLength(0);
+  });
+
+  it("offers the option on both writing tools, enum-bound for the boundary check", () => {
+    for (const name of ["sheets_update", "sheets_append"]) {
+      const tool = sheetsTools.find((t) => t.name === name);
+      const prop = (
+        tool?.inputSchema.properties as Record<
+          string,
+          { enum?: string[] } | undefined
+        >
+      ).value_input_option;
+      expect(prop?.enum).toEqual(["USER_ENTERED", "RAW"]);
+    }
+  });
+});
+
 describe("sheets_read value_render_option", () => {
   it("omits the parameter entirely when the caller does not set it", async () => {
     const { client, calls } = fakeClient([{ data: { values: [["a"]] } }]);
