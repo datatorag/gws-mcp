@@ -1,16 +1,17 @@
-import type { GwsClient } from "../gws-client.js";
+import { errorMessage, type GwsClient } from "../gws-client.js";
 import { CREATE, READ, ToolDef } from "./annotations.js";
-import { jsonResponse, deleteDriveFile } from "./response.js";
-import { handleDocs } from "./docs.js";
-import { handleSheets } from "./sheets.js";
-import { handleSlides } from "./slides.js";
+import { jsonResponse } from "./response.js";
+import { deleteDriveFile } from "./drive-ops.js";
+import { readDocText } from "./docs.js";
+import { readSheetValues } from "./sheets.js";
+import { getPresentationOutline } from "./slides.js";
 
 export const driveTools: ToolDef[] = [
   {
     name: "drive_create_folder",
     description: "Create a new folder in Google Drive.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         name: {
           type: "string",
@@ -30,7 +31,7 @@ export const driveTools: ToolDef[] = [
     description:
       "Search for files in Google Drive. Returns file names, IDs, types, and modification dates.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         query: {
           type: "string",
@@ -51,7 +52,7 @@ export const driveTools: ToolDef[] = [
     description:
       "Read the text content of any file in Google Drive by file ID. Supports Google Docs, Sheets, Slides, Office formats (.docx/.xlsx/.pptx — auto-converted), and plain text files. Returns extracted text directly — no local filesystem needed.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         file_id: {
           type: "string",
@@ -108,10 +109,9 @@ export async function handleDrive(
 
       // Step 1: Get file metadata
       const meta = await client.api("drive", "files", "get", {
-        params: { fileId, fields: "id,name,mimeType", supportsAllDrives: true },
+        params: { fileId, fields: "name,mimeType", supportsAllDrives: true },
       });
-      const file = meta.data as { id: string; name: string; mimeType: string };
-      const { name, mimeType } = file;
+      const { name, mimeType } = meta.data as { name: string; mimeType: string };
 
       // Step 2: Route by mimeType
       const content = await readFileContent(client, fileId, name, mimeType);
@@ -129,51 +129,42 @@ async function readFileContent(
   name: string,
   mimeType: string
 ): Promise<unknown> {
-  // Native Google Doc
+  // Native Google formats: the same extraction the dedicated tools use,
+  // called at the data level rather than through their MCP response
+  // envelopes.
   if (mimeType === GOOGLE_DOC) {
-    const result = await handleDocs(client, "docs_get", {
-      document_id: fileId,
-      mode: "text",
-    });
-    const parsed = JSON.parse(result.content[0].text);
-    return parsed.text;
+    return readDocText(client, fileId);
   }
-
-  // Native Google Sheet
   if (mimeType === GOOGLE_SHEET) {
-    const result = await handleSheets(client, "sheets_read", {
-      spreadsheet_id: fileId,
-      range: "A1:Z1000",
-    });
-    const parsed = JSON.parse(result.content[0].text);
-    return parsed.values;
+    return (await readSheetValues(client, fileId, "A1:Z1000")).values;
   }
-
-  // Native Google Slides
   if (mimeType === GOOGLE_SLIDES) {
-    const result = await handleSlides(client, "slides_get", {
-      presentation_id: fileId,
-    });
-    const parsed = JSON.parse(result.content[0].text);
-    return parsed.slides;
+    return (await getPresentationOutline(client, fileId)).slides;
   }
 
   // Office formats → copy-convert to native, read, delete copy
   if (mimeType.startsWith(OFFICE_PREFIX)) {
+    const target = mimeType.includes("wordprocessing")
+      ? GOOGLE_DOC
+      : mimeType.includes("spreadsheet")
+        ? GOOGLE_SHEET
+        : GOOGLE_SLIDES;
     let copy: { id: string; mimeType: string } | undefined;
     try {
       const copyResult = await client.api("drive", "files", "copy", {
         params: { fileId, supportsAllDrives: true },
-        jsonBody: { name: `${name} [MCP temp]`, mimeType: mimeType.includes("wordprocessing") ? GOOGLE_DOC : mimeType.includes("spreadsheet") ? GOOGLE_SHEET : GOOGLE_SLIDES },
+        jsonBody: { name: `${name} [MCP temp]`, mimeType: target },
       });
       copy = copyResult.data as { id: string; mimeType: string };
       return await readFileContent(client, copy.id, name, copy.mimeType);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return { error: `Failed to read Office file: ${msg}` };
+      return { error: `Failed to read Office file: ${errorMessage(err)}` };
     } finally {
       if (copy?.id) {
-        await deleteDriveFile(client, copy.id).catch(() => {});
+        // Fire-and-forget: the caller never sees the temp copy, so its
+        // cleanup should not hold the response for another round-trip.
+        // Errors were already swallowed when this was awaited.
+        void deleteDriveFile(client, copy.id).catch(() => {});
       }
     }
   }

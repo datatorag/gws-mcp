@@ -1,22 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
-import type { GwsClient } from "../gws-client.js";
+import { describe, expect, it } from "vitest";
 import { gmailTools, handleGmail } from "./gmail.js";
 import { MUTATE, READ } from "./annotations.js";
-
-function fakeClient(plan: Array<{ data?: unknown; throws?: string }>) {
-  const calls: Array<Record<string, unknown>> = [];
-  const api = vi.fn(async (service, resource, method, opts) => {
-    calls.push({ service, resource, method, ...opts });
-    const step = plan.shift();
-    if (!step) throw new Error("fake client: no planned response left");
-    if (step.throws) throw new Error(step.throws);
-    return { success: true, data: step.data };
-  });
-  return { client: { api } as unknown as GwsClient, calls };
-}
-
-const payload = (r: { content: { text: string }[] }) =>
-  JSON.parse(r.content[0].text);
+import { fakeClient, payload } from "./fake-client.test-helper.js";
 
 describe("gmail_create_label", () => {
   it("returns the created label with its id", async () => {

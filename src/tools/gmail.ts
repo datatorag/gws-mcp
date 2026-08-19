@@ -30,8 +30,8 @@ export const gmailTools: ToolDef[] = [
     description:
       "Send a new email via Gmail. Composes and sends an email message to the specified recipients.",
     inputSchema: {
-      type: "object" as const,
-      properties: { ...emailFields },
+      type: "object",
+      properties: emailFields,
       required: ["to", "subject", "body"],
     },
     annotations: MUTATE("Send email"),
@@ -40,7 +40,7 @@ export const gmailTools: ToolDef[] = [
     name: "gmail_reply",
     description: "Reply to an existing email thread in Gmail.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         message_id: {
           type: "string",
@@ -56,7 +56,7 @@ export const gmailTools: ToolDef[] = [
     name: "gmail_forward",
     description: "Forward an existing email to another recipient.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         message_id: {
           type: "string",
@@ -76,7 +76,7 @@ export const gmailTools: ToolDef[] = [
     description:
       "Read a specific email message by its ID. By default returns the full message including headers, body, and metadata. Use text_only for a compact view (flattened headers, decoded text body, attachment metadata) that avoids large MIME/base64 payloads.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         message_id: {
           type: "string",
@@ -102,7 +102,7 @@ export const gmailTools: ToolDef[] = [
     description:
       "Search Gmail messages using Gmail search syntax. Returns matching messages with flattened from/to/subject/date fields plus snippet and labels. Supports queries like \"from:client@acme.com\", \"subject:proposal\", \"after:2024/01/01\", \"has:attachment\", \"label:important\".",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         query: {
           type: "string",
@@ -123,7 +123,7 @@ export const gmailTools: ToolDef[] = [
     description:
       "List recent emails from the inbox. Optionally filter by label. Returns message IDs with flattened from/to/subject/date fields plus snippet and labels.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         label: {
           type: "string",
@@ -135,7 +135,7 @@ export const gmailTools: ToolDef[] = [
           description: "Maximum number of messages to return (default: 10)",
         },
       },
-      required: [] as string[],
+      required: [],
     },
     annotations: READ("List emails"),
   },
@@ -144,8 +144,8 @@ export const gmailTools: ToolDef[] = [
     description:
       "Create a draft email in Gmail without sending it. The draft can be reviewed and sent later from Gmail. Returns the draft ID and a link to open it in Gmail.",
     inputSchema: {
-      type: "object" as const,
-      properties: { ...emailFields },
+      type: "object",
+      properties: emailFields,
       required: ["to", "subject", "body"],
     },
     annotations: CREATE("Create email draft"),
@@ -155,7 +155,7 @@ export const gmailTools: ToolDef[] = [
     description:
       "Update an existing draft email in Gmail. This fully replaces the draft's message content (Gmail API does not support partial edits). If thread_id is omitted, the tool preserves the existing thread automatically.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         draft_id: {
           type: "string",
@@ -177,7 +177,7 @@ export const gmailTools: ToolDef[] = [
     description:
       "Send an existing Gmail draft by its draft ID. Use this to send a draft that was previously created with gmail_create_draft and reviewed — it sends the draft as-is and removes it from the Drafts folder (no orphaned draft). Returns the sent message metadata.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         draft_id: {
           type: "string",
@@ -193,7 +193,7 @@ export const gmailTools: ToolDef[] = [
     description:
       "Permanently delete a Gmail draft by its draft ID. This does not move the draft to Trash — it is removed immediately. Use gmail_send_draft to send a draft instead of deleting it.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         draft_id: {
           type: "string",
@@ -209,7 +209,7 @@ export const gmailTools: ToolDef[] = [
     description:
       "Mark one or more Gmail messages as read by removing the UNREAD label. Can also add or remove other labels. Pass message_id for a single message (returns the modified message) or message_ids for a batch (up to 1000, single API call via users.messages.batchModify).",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         message_id: {
           type: "string",
@@ -235,7 +235,7 @@ export const gmailTools: ToolDef[] = [
             'Label IDs to remove (e.g., ["UNREAD", "INBOX"]). Defaults to ["UNREAD"] if neither add_labels nor remove_labels is provided.',
         },
       },
-      required: [] as string[],
+      required: [],
     },
     annotations: MUTATE("Change email read state and labels"),
   },
@@ -244,9 +244,9 @@ export const gmailTools: ToolDef[] = [
     description:
       "List all Gmail filters (settings > filters) with their criteria and actions. Read-only: use it to see what automation a mailbox already applies to incoming mail, for example when triaging why a message was archived or labelled before it was seen. This connector cannot create or delete filters, and neither can a raw API call through gws_run — Google accepts only the gmail.settings.basic scope on those, which is not granted. Filters must be changed in Gmail's own settings.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {},
-      required: [] as string[],
+      required: [],
     },
     annotations: READ("List email filters"),
   },
@@ -270,7 +270,7 @@ export const gmailTools: ToolDef[] = [
     description:
       "Create a Gmail label. Nested labels use '/' in the name (e.g. 'Alerts/Invoices'). Returns the created label including its ID, which can be used with gmail_label_message. Use gmail_list_labels to see existing labels.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         name: {
           type: "string",
@@ -286,7 +286,7 @@ export const gmailTools: ToolDef[] = [
     description:
       "List every label in the mailbox, system and user-created, with each label's ID, name and type. Use this to find the label ID that gmail_label_message, gmail_update_label and gmail_delete_label need.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {},
     },
     annotations: READ("List email labels"),
@@ -296,7 +296,7 @@ export const gmailTools: ToolDef[] = [
     description:
       "Rename an existing Gmail label, or change its visibility. Takes the label ID (from gmail_list_labels), not the label name. Renaming a label keeps it on every message already labelled with it.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         label_id: {
           type: "string",
@@ -329,7 +329,7 @@ export const gmailTools: ToolDef[] = [
     description:
       "Delete a Gmail label. Takes the label ID (from gmail_list_labels), not the label name. This removes the label from every message that carries it; the messages themselves are not deleted. System labels (INBOX, UNREAD, SENT) cannot be deleted.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         label_id: {
           type: "string",
@@ -345,7 +345,7 @@ export const gmailTools: ToolDef[] = [
     description:
       "Add or remove labels on one or more messages. Removing the INBOX label archives a message; removing UNREAD marks it read. Label IDs come from gmail_list_labels. To only flip read state, gmail_mark_read is the narrower tool.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         message_id: {
           type: "string",
@@ -377,7 +377,7 @@ export const gmailTools: ToolDef[] = [
     description:
       "Save a Gmail attachment directly to Google Drive. Use gmail_read first to get attachment metadata (filename, mimeType, attachmentId) from the message parts. The file is fetched from Gmail and uploaded to Drive server-side — no base64 data flows through the conversation. Returns the Drive file metadata including a web link.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         message_id: {
           type: "string",
@@ -688,17 +688,12 @@ export async function handleGmail(
         await writeFile(tmpFile, buf);
 
         // 3. Upload to Drive via gws CLI helper
-        const uploadArgs = [
-          "drive",
-          "+upload",
-          tmpFile,
-          "--name",
-          args.filename as string,
-        ];
+        const flags: Record<string, string> = { name: args.filename as string };
         if (args.parent_folder_id) {
-          uploadArgs.push("--parent", args.parent_folder_id as string);
+          flags.parent = args.parent_folder_id as string;
         }
-        const uploadResult = await client.exec(uploadArgs, {
+        const uploadResult = await client.helper("drive", "upload", flags, {
+          positional: [tmpFile],
           timeout: 120_000,
         });
         return jsonResponse(uploadResult.data);

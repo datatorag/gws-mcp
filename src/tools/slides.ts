@@ -1,6 +1,7 @@
 import type { GwsClient } from "../gws-client.js";
 import { CREATE, MUTATE, READ, ToolDef } from "./annotations.js";
-import { jsonResponse, deleteResponse, deleteDriveFile } from "./response.js";
+import { jsonResponse } from "./response.js";
+import { deleteDriveFileResponse } from "./drive-ops.js";
 
 export const slidesTools: ToolDef[] = [
   {
@@ -8,7 +9,7 @@ export const slidesTools: ToolDef[] = [
     description:
       "Get the content of a Google Slides presentation. Returns slide objectIds, placeholder types (TITLE/BODY/SUBTITLE), and text content — stripped of layout/styling data to fit context windows. Use the returned objectIds with slides_batch_update for edits.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         presentation_id: {
           type: "string",
@@ -24,7 +25,7 @@ export const slidesTools: ToolDef[] = [
     description:
       "Create a new Google Slides presentation. Returns the presentationId and a placeholder_map for each slide mapping placeholder types (TITLE, BODY, SUBTITLE) to their objectIds — use these with slides_batch_update insertText.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         title: {
           type: "string",
@@ -40,7 +41,7 @@ export const slidesTools: ToolDef[] = [
     description:
       "Apply batch updates to a Google Slides presentation. Supports inserting text, replacing text, creating slides, deleting objects, and other modifications. Uses the Google Slides API batchUpdate format.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         presentation_id: {
           type: "string",
@@ -62,7 +63,7 @@ export const slidesTools: ToolDef[] = [
     description:
       "Delete a Google Slides presentation. This permanently removes the file from Drive.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         presentation_id: {
           type: "string",
@@ -111,7 +112,7 @@ function trimPresentation(data: Record<string, unknown>) {
           if (el.shape?.placeholder?.type) {
             result.placeholderType = el.shape.placeholder.type;
           }
-          result.text = text || undefined;
+          if (text) result.text = text;
           return result;
         });
 
@@ -131,18 +132,26 @@ function trimPresentation(data: Record<string, unknown>) {
   };
 }
 
+/** Trimmed outline of a presentation, for callers that want data rather than
+ * an MCP response envelope (slides_get itself, drive_read_file). */
+export async function getPresentationOutline(
+  client: GwsClient,
+  presentationId: unknown
+) {
+  const result = await client.api("slides", "presentations", "get", {
+    params: { presentationId },
+  });
+  return trimPresentation(result.data as Record<string, unknown>);
+}
+
 export async function handleSlides(
   client: GwsClient,
   toolName: string,
   args: Record<string, unknown>
 ) {
   switch (toolName) {
-    case "slides_get": {
-      const result = await client.api("slides", "presentations", "get", {
-        params: { presentationId: args.presentation_id },
-      });
-      return jsonResponse(trimPresentation(result.data as Record<string, unknown>));
-    }
+    case "slides_get":
+      return jsonResponse(await getPresentationOutline(client, args.presentation_id));
 
     case "slides_create": {
       const result = await client.api("slides", "presentations", "create", {
@@ -164,10 +173,8 @@ export async function handleSlides(
       return jsonResponse(result.data);
     }
 
-    case "slides_delete": {
-      await deleteDriveFile(client, args.presentation_id);
-      return deleteResponse("Presentation");
-    }
+    case "slides_delete":
+      return deleteDriveFileResponse(client, args.presentation_id, "Presentation");
 
     default:
       throw new Error(`Unknown Slides tool: ${toolName}`);

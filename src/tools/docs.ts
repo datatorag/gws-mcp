@@ -1,6 +1,7 @@
 import type { GwsClient } from "../gws-client.js";
 import { CREATE, MUTATE, READ, ToolDef } from "./annotations.js";
-import { jsonResponse, deleteResponse, deleteDriveFile } from "./response.js";
+import { jsonResponse } from "./response.js";
+import { deleteDriveFileResponse } from "./drive-ops.js";
 
 export const docsTools: ToolDef[] = [
   {
@@ -8,7 +9,7 @@ export const docsTools: ToolDef[] = [
     description:
       'Get the content of a Google Doc. Three modes: "text" (default) returns plain text — use for reading/summarizing. "index" returns text with startIndex/endIndex — use before positional edits (insertText at index, deleteContentRange). "full" returns the raw API response — use only for debugging or style operations.',
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         document_id: {
           type: "string",
@@ -30,7 +31,7 @@ export const docsTools: ToolDef[] = [
     description:
       "Insert text at the beginning of a Google Doc. To append or edit at a specific position, use docs_get (mode 'index') then docs_batch_update.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         document_id: {
           type: "string",
@@ -50,7 +51,7 @@ export const docsTools: ToolDef[] = [
     description:
       "Apply batch updates to a Google Doc. Supports inserting text, replacing text, deleting content ranges, and other document modifications. Uses the Google Docs API batchUpdate format.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         document_id: {
           type: "string",
@@ -71,7 +72,7 @@ export const docsTools: ToolDef[] = [
     name: "docs_create",
     description: "Create a new Google Doc.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         title: {
           type: "string",
@@ -87,7 +88,7 @@ export const docsTools: ToolDef[] = [
     description:
       "Delete a Google Doc. This permanently removes the document from Drive.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         document_id: {
           type: "string",
@@ -158,11 +159,26 @@ function docResult(
   return result;
 }
 
-function extractText(data: Record<string, unknown>): Record<string, unknown> {
-  const text = docRuns(data)
+function runsToText(data: Record<string, unknown>): string {
+  return docRuns(data)
     .map((r) => r.text ?? `[image:${r.inlineObjectId}]`)
     .join("");
-  return docResult(data, { text });
+}
+
+function extractText(data: Record<string, unknown>): Record<string, unknown> {
+  return docResult(data, { text: runsToText(data) });
+}
+
+/** Plain text of a document, for callers that want data rather than an MCP
+ * response envelope (drive_read_file). */
+export async function readDocText(
+  client: GwsClient,
+  documentId: unknown
+): Promise<string> {
+  const result = await client.api("docs", "documents", "get", {
+    params: { documentId },
+  });
+  return runsToText(result.data as Record<string, unknown>);
 }
 
 function extractIndexed(data: Record<string, unknown>): Record<string, unknown> {
@@ -219,10 +235,8 @@ export async function handleDocs(
       return jsonResponse(result.data);
     }
 
-    case "docs_delete": {
-      await deleteDriveFile(client, args.document_id);
-      return deleteResponse("Document");
-    }
+    case "docs_delete":
+      return deleteDriveFileResponse(client, args.document_id, "Document");
 
     default:
       throw new Error(`Unknown Docs tool: ${toolName}`);

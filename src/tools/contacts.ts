@@ -8,7 +8,7 @@ export const contactsTools: ToolDef[] = [
     description:
       "Search Google Contacts by name, email, or phone number. Returns matching contacts with their details.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         query: {
           type: "string",
@@ -29,7 +29,7 @@ export const contactsTools: ToolDef[] = [
     description:
       "Get full details of a specific contact by their resource name.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         resource_name: {
           type: "string",
@@ -46,14 +46,14 @@ export const contactsTools: ToolDef[] = [
     description:
       "List contacts from the user's Google Contacts. Returns names, emails, phone numbers, and organizations.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         max_results: {
           type: "number",
           description: "Maximum number of contacts to return (default: 20)",
         },
       },
-      required: [] as string[],
+      required: [],
     },
     annotations: READ("List contacts"),
   },
@@ -61,7 +61,7 @@ export const contactsTools: ToolDef[] = [
     name: "contacts_create",
     description: "Create a new contact in Google Contacts.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         name: {
           type: "string",
@@ -97,7 +97,7 @@ export const contactsTools: ToolDef[] = [
     description:
       "Update an existing contact. Only provided fields are changed.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         resource_name: {
           type: "string",
@@ -137,7 +137,7 @@ export const contactsTools: ToolDef[] = [
     name: "contacts_delete",
     description: "Delete a contact from Google Contacts.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         resource_name: {
           type: "string",
@@ -154,7 +154,7 @@ export const contactsTools: ToolDef[] = [
     description:
       "Search the company's Google Workspace directory (all users in the organization). Useful for finding colleagues' contact info.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         query: {
           type: "string",
