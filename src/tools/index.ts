@@ -1,4 +1,5 @@
 import type { GwsClient } from "../gws-client.js";
+import type { ToolDef } from "./annotations.js";
 import { authTools, handleAuth } from "./auth.js";
 import { genericTools, handleGeneric } from "./generic.js";
 import { gmailTools, handleGmail } from "./gmail.js";
@@ -16,35 +17,25 @@ export type ToolHandler = (
   args: Record<string, unknown>
 ) => Promise<{ content: { type: "text"; text: string }[]; isError?: boolean }>;
 
-export const allTools = [
-  ...authTools,
-  ...gmailTools,
-  ...calendarTools,
-  ...contactsTools,
-  ...driveTools,
-  ...sheetsTools,
-  ...docsTools,
-  ...slidesTools,
-  ...tasksTools,
-  ...genericTools,
+// One entry per module: the tool list and the dispatch map both derive from
+// it, so a new module is a one-line addition rather than a two-list edit.
+const modules: [ToolDef[], ToolHandler][] = [
+  [authTools, handleAuth],
+  [gmailTools, handleGmail],
+  [calendarTools, handleCalendar],
+  [contactsTools, handleContacts],
+  [driveTools, handleDrive],
+  [sheetsTools, handleSheets],
+  [docsTools, handleDocs],
+  [slidesTools, handleSlides],
+  [tasksTools, handleTasks],
+  [genericTools, handleGeneric],
 ];
 
-function register(
-  toolDefs: { name: string }[],
-  handler: ToolHandler
-): [string, ToolHandler][] {
-  return toolDefs.map((t) => [t.name, handler]);
-}
+export const allTools = modules.flatMap(([tools]) => tools);
 
-export const toolHandlers = new Map<string, ToolHandler>([
-  ...register(authTools, handleAuth),
-  ...register(gmailTools, handleGmail),
-  ...register(calendarTools, handleCalendar),
-  ...register(contactsTools, handleContacts),
-  ...register(driveTools, handleDrive),
-  ...register(sheetsTools, handleSheets),
-  ...register(docsTools, handleDocs),
-  ...register(slidesTools, handleSlides),
-  ...register(tasksTools, handleTasks),
-  ...register(genericTools, handleGeneric),
-]);
+export const toolHandlers = new Map<string, ToolHandler>(
+  modules.flatMap(([tools, handler]) =>
+    tools.map((t) => [t.name, handler] as [string, ToolHandler])
+  )
+);

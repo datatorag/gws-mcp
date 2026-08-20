@@ -1,20 +1,11 @@
 import { spawn } from "node:child_process";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { createMcpServer, gwsClient } from "./create-server.js";
-import { DEFAULT_SERVICES } from "./gws-client.js";
-
-// Scopes that must be present — if any are missing, re-auth is triggered.
-// Uses substrings to match regardless of full URL vs short form.
-const REQUIRED_SCOPE_KEYWORDS = [
-  "drive",
-  "gmail",
-  "calendar",
-  "documents",
-  "spreadsheets",
-  "presentations",
-  "contacts",
-  "tasks",
-];
+import {
+  DEFAULT_SERVICES,
+  REQUIRED_SCOPE_KEYWORDS,
+  errorMessage,
+} from "./gws-client.js";
 
 // Catch any uncaught errors so they appear in Claude Desktop logs
 process.on("uncaughtException", (err) => {
@@ -71,5 +62,5 @@ gwsClient.authStatus().then((status) => {
     }
   }
 }).catch((err) => {
-  console.error("Auth status check failed:", err instanceof Error ? err.message : err);
+  console.error("Auth status check failed:", errorMessage(err));
 });

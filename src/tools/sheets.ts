@@ -1,6 +1,7 @@
-import type { GwsClient } from "../gws-client.js";
+import { errorMessage, type GwsClient } from "../gws-client.js";
 import { CREATE, MUTATE, READ, ToolDef } from "./annotations.js";
-import { jsonResponse, deleteResponse, deleteDriveFile } from "./response.js";
+import { jsonResponse, deleteResponse } from "./response.js";
+import { deleteDriveFileResponse } from "./drive-ops.js";
 
 /** Values whose first character makes Sheets treat the cell as a formula.
  *
@@ -140,7 +141,7 @@ export const sheetsTools: ToolDef[] = [
     description:
       "Read data from a Google Sheets spreadsheet. Returns cell values for the specified range.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         spreadsheet_id: {
           type: "string",
@@ -167,7 +168,7 @@ export const sheetsTools: ToolDef[] = [
     description:
       "Update specific cells in a Google Sheets spreadsheet. Overwrites existing values in the specified range.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         spreadsheet_id: {
           type: "string",
@@ -198,7 +199,7 @@ export const sheetsTools: ToolDef[] = [
     description:
       "Append rows to the end of a Google Sheets spreadsheet.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         spreadsheet_id: {
           type: "string",
@@ -229,7 +230,7 @@ export const sheetsTools: ToolDef[] = [
     name: "sheets_create",
     description: "Create a new Google Sheets spreadsheet.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         title: {
           type: "string",
@@ -253,7 +254,7 @@ export const sheetsTools: ToolDef[] = [
     description:
       "Add a new tab (sheet) to an existing Google Sheets spreadsheet. Use sheets_create to make a whole new spreadsheet file; use this to add a tab inside one. Returns the new tab's sheetId and title.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         spreadsheet_id: {
           type: "string",
@@ -279,7 +280,7 @@ export const sheetsTools: ToolDef[] = [
     description:
       "Rename a tab (sheet) inside a Google Sheets spreadsheet. Takes the tab's current title, not its sheetId. Renaming changes only the label: every row, formula and value in the tab is untouched. Ranges that name the old title will stop resolving, so update any saved ranges afterwards.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         spreadsheet_id: {
           type: "string",
@@ -304,7 +305,7 @@ export const sheetsTools: ToolDef[] = [
     description:
       "Clear the values in a range, leaving the tab and its formatting in place. This is the non-destructive way to empty a tab or a block of cells — use it instead of deleting and recreating a tab, which throws away the tab's structure along with its data.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         spreadsheet_id: {
           type: "string",
@@ -327,7 +328,7 @@ export const sheetsTools: ToolDef[] = [
     description:
       "Delete a tab (sheet) and everything in it from a spreadsheet. Takes the tab's current title. THIS DESTROYS EVERY ROW IN THE TAB and cannot be undone through the API. To empty a tab without losing it, use sheets_clear instead. To delete the whole spreadsheet file, use sheets_delete.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         spreadsheet_id: {
           type: "string",
@@ -349,7 +350,7 @@ export const sheetsTools: ToolDef[] = [
     description:
       "Delete a Google Sheets spreadsheet. This permanently removes the file from Drive.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         spreadsheet_id: {
           type: "string",
@@ -385,42 +386,58 @@ export function quoteTabForRange(title: string): string {
 
 const UNPARSEABLE_RANGE = /unable to parse range/i;
 
+/** The one tab-list fetch behind both the missing-tab diagnosis and
+ * title→sheetId resolution — the two used to carry their own copies and had
+ * already drifted apart. */
+async function listTabs(
+  client: GwsClient,
+  spreadsheetId: unknown
+): Promise<{ sheetId?: number; title?: string }[]> {
+  const result = await client.api("sheets", "spreadsheets", "get", {
+    params: { spreadsheetId, fields: "sheets.properties(sheetId,title)" },
+  });
+  const data = result.data as {
+    sheets?: { properties?: { sheetId?: number; title?: string } }[];
+  };
+  return (data.sheets ?? []).map((sheet) => sheet.properties ?? {});
+}
+
+function tabTitles(props: { title?: string }[]): string[] {
+  return props
+    .map((p) => p.title)
+    .filter((t): t is string => typeof t === "string");
+}
+
+function noSuchTabError(tab: string, titles: string[], hint = ""): Error {
+  return new Error(
+    `No sheet named "${tab}" in this spreadsheet. Existing tabs: ` +
+      `${titles.map((t) => `"${t}"`).join(", ") || "(none)"}.${hint}`
+  );
+}
+
 /** Google reports a range naming a missing tab as a SYNTAX error ("Unable to
  * parse range: …"), which sends users off to rewrite perfectly valid A1
  * notation. When the failed range names a tab, look up the spreadsheet's real
  * tab list and say what is actually wrong — and if the named tab does exist
- * (or the range has no tab prefix), the original error stands, because then
- * the syntax genuinely is the problem. */
-async function rethrowWithTabContext(
+ * (or the range has no tab prefix), returns undefined because then the
+ * original error stands: the syntax genuinely is the problem. */
+async function missingTabError(
   client: GwsClient,
   spreadsheetId: unknown,
   range: string,
   err: unknown
-): Promise<never> {
-  const message = err instanceof Error ? err.message : String(err);
-  if (!UNPARSEABLE_RANGE.test(message)) throw err;
+): Promise<Error | undefined> {
+  if (!UNPARSEABLE_RANGE.test(errorMessage(err))) return undefined;
   const tab = tabNameFromRange(range);
-  if (!tab) throw err;
+  if (!tab) return undefined;
   let titles: string[];
   try {
-    const result = await client.api("sheets", "spreadsheets", "get", {
-      params: { spreadsheetId, fields: "sheets.properties.title" },
-    });
-    const data = result.data as {
-      sheets?: { properties?: { title?: string } }[];
-    };
-    titles = (data.sheets ?? [])
-      .map((s) => s.properties?.title)
-      .filter((t): t is string => typeof t === "string");
+    titles = tabTitles(await listTabs(client, spreadsheetId));
   } catch {
-    throw err;
+    return undefined;
   }
-  if (titles.includes(tab)) throw err;
-  throw new Error(
-    `No sheet named "${tab}" in this spreadsheet. Existing tabs: ` +
-      `${titles.map((t) => `"${t}"`).join(", ") || "(none)"}. ` +
-      `Create it first with sheets_add_tab.`
-  );
+  if (titles.includes(tab)) return undefined;
+  return noSuchTabError(tab, titles, " Create it first with sheets_add_tab.");
 }
 
 /** Resolve a tab title to the sheetId the batchUpdate API needs.
@@ -435,24 +452,47 @@ async function resolveSheetId(
   spreadsheetId: unknown,
   title: string
 ): Promise<number> {
-  const result = await client.api("sheets", "spreadsheets", "get", {
-    params: { spreadsheetId, fields: "sheets.properties(sheetId,title)" },
-  });
-  const data = result.data as {
-    sheets?: { properties?: { sheetId?: number; title?: string } }[];
-  };
-  const props = (data.sheets ?? []).map((sheet) => sheet.properties ?? {});
+  const props = await listTabs(client, spreadsheetId);
   const match = props.find((p) => p.title === title);
   if (match?.sheetId === undefined) {
-    const titles = props
-      .map((p) => p.title)
-      .filter((t): t is string => typeof t === "string");
-    throw new Error(
-      `No sheet named "${title}" in this spreadsheet. Existing tabs: ` +
-        `${titles.map((t) => `"${t}"`).join(", ") || "(none)"}.`
-    );
+    throw noSuchTabError(title, tabTitles(props));
   }
   return match.sheetId;
+}
+
+/** Read a range and square it up (rows padded to equal width), for callers
+ * that want data rather than an MCP response envelope (sheets_read itself,
+ * drive_read_file). */
+export async function readSheetValues(
+  client: GwsClient,
+  spreadsheetId: unknown,
+  range: unknown,
+  valueRenderOption?: unknown
+) {
+  const result = await client.api("sheets", "spreadsheets.values", "get", {
+    params: {
+      spreadsheetId,
+      range,
+      // Omitted entirely when unset: the API's own default is
+      // FORMATTED_VALUE, and sending it explicitly would be a second
+      // place for that default to drift from Google's.
+      ...(valueRenderOption ? { valueRenderOption } : {}),
+    },
+  });
+  const data = result.data as Record<string, unknown>;
+  const values = (data.values as string[][] | undefined) || [];
+  const columnCount = values.reduce((max, row) => Math.max(max, row.length), 0);
+  const normalized = values.map((row) =>
+    row.length < columnCount
+      ? [...row, ...Array(columnCount - row.length).fill("")]
+      : row
+  );
+  return {
+    range: data.range,
+    rowCount: normalized.length,
+    columnCount,
+    values: normalized,
+  };
 }
 
 const APPEND_DEFAULT_RANGE = "Sheet1!A1";
@@ -482,8 +522,7 @@ export async function handleSheets(
   } catch (err) {
     const range = rangeInvolvedIn(toolName, args);
     if (!range) throw err;
-    await rethrowWithTabContext(client, args.spreadsheet_id, range, err);
-    throw err;
+    throw (await missingTabError(client, args.spreadsheet_id, range, err)) ?? err;
   }
 }
 
@@ -493,39 +532,15 @@ async function dispatchSheets(
   args: Record<string, unknown>
 ) {
   switch (toolName) {
-    case "sheets_read": {
-      const result = await client.api(
-        "sheets",
-        "spreadsheets.values",
-        "get",
-        {
-          params: {
-            spreadsheetId: args.spreadsheet_id,
-            range: args.range,
-            // Omitted entirely when unset: the API's own default is
-            // FORMATTED_VALUE, and sending it explicitly would be a second
-            // place for that default to drift from Google's.
-            ...(args.value_render_option
-              ? { valueRenderOption: args.value_render_option }
-              : {}),
-          },
-        }
+    case "sheets_read":
+      return jsonResponse(
+        await readSheetValues(
+          client,
+          args.spreadsheet_id,
+          args.range,
+          args.value_render_option
+        )
       );
-      const data = result.data as Record<string, unknown>;
-      const values = (data.values as string[][] | undefined) || [];
-      const columnCount = values.reduce((max, row) => Math.max(max, row.length), 0);
-      const normalized = values.map((row) =>
-        row.length < columnCount
-          ? [...row, ...Array(columnCount - row.length).fill("")]
-          : row
-      );
-      return jsonResponse({
-        range: data.range,
-        rowCount: normalized.length,
-        columnCount,
-        values: normalized,
-      });
-    }
 
     case "sheets_update": {
       const { valueInputOption, values } = resolveValueInput(args);
@@ -684,8 +699,7 @@ async function dispatchSheets(
     }
 
     case "sheets_delete": {
-      await deleteDriveFile(client, args.spreadsheet_id);
-      return deleteResponse("Spreadsheet");
+      return deleteDriveFileResponse(client, args.spreadsheet_id, "Spreadsheet");
     }
 
     default:

@@ -114,13 +114,33 @@ function compactEvent(event: RawEvent, maxDescriptionChars: number) {
   return out;
 }
 
+// Shared schema fragments — the same calendar_id block appeared in four
+// tools and the send_updates block in three, differing only in which action
+// the notification is about.
+const calendarIdParam = {
+  calendar_id: {
+    type: "string",
+    description: "Calendar ID (default: \"primary\")",
+  },
+} as const;
+
+function sendUpdatesParam(action: "invite" | "update" | "cancellation") {
+  return {
+    send_updates: {
+      type: "string",
+      enum: ["all", "externalOnly", "none"],
+      description: `Who to send ${action} notifications to (default: "all")`,
+    },
+  } as const;
+}
+
 export const calendarTools: ToolDef[] = [
   {
     name: "calendar_list_events",
     description:
       "List upcoming events from a Google Calendar. By default returns a compact view per event: id, title, start/end, location, plain-text description (HTML stripped, truncated), organizer email, attendee count plus your own response status, the full attendee roster when the meeting has 10 or fewer people, a recurring flag, attachments, and the video join link (Meet or conference-data providers like Zoom). Only large-meeting rosters, reminders, and raw HTML are dropped — use full for the raw Calendar API payload, or calendar_get_event for one event's complete detail.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         calendar_id: {
           type: "string",
@@ -156,7 +176,7 @@ export const calendarTools: ToolDef[] = [
             "In the compact view, truncate each event's plain-text description to this many characters (default: 500; adds a truncation marker). Set to 0 to omit descriptions entirely. Ignored when full is true.",
         },
       },
-      required: [] as string[],
+      required: [],
     },
     annotations: READ("List calendar events"),
   },
@@ -165,16 +185,13 @@ export const calendarTools: ToolDef[] = [
     description:
       "Get details of a specific calendar event by its event ID. Returns the full event (all attendees, reminders, conference data), with the description converted to plain text; use full for the original (often HTML) description.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         event_id: {
           type: "string",
           description: "The calendar event ID",
         },
-        calendar_id: {
-          type: "string",
-          description: "Calendar ID (default: \"primary\")",
-        },
+        ...calendarIdParam,
         full: {
           type: "boolean",
           description:
@@ -190,7 +207,7 @@ export const calendarTools: ToolDef[] = [
     description:
       "Create a new calendar event. Supports setting title, time, attendees, description, location, and Google Meet links.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         summary: {
           type: "string",
@@ -224,16 +241,8 @@ export const calendarTools: ToolDef[] = [
           description:
             "Attach a Google Meet video conference link to the event (default: false)",
         },
-        calendar_id: {
-          type: "string",
-          description: "Calendar ID (default: \"primary\")",
-        },
-        send_updates: {
-          type: "string",
-          enum: ["all", "externalOnly", "none"],
-          description:
-            "Who to send invite notifications to (default: \"all\")",
-        },
+        ...calendarIdParam,
+        ...sendUpdatesParam("invite"),
       },
       required: ["summary", "start", "end"],
     },
@@ -244,7 +253,7 @@ export const calendarTools: ToolDef[] = [
     description:
       "Update an existing calendar event. Only provided fields are changed.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         event_id: {
           type: "string",
@@ -274,15 +283,8 @@ export const calendarTools: ToolDef[] = [
           type: "string",
           description: "New event location",
         },
-        calendar_id: {
-          type: "string",
-          description: "Calendar ID (default: \"primary\")",
-        },
-        send_updates: {
-          type: "string",
-          enum: ["all", "externalOnly", "none"],
-          description: "Who to send update notifications to (default: \"all\")",
-        },
+        ...calendarIdParam,
+        ...sendUpdatesParam("update"),
       },
       required: ["event_id"],
     },
@@ -292,22 +294,14 @@ export const calendarTools: ToolDef[] = [
     name: "calendar_delete_event",
     description: "Delete a calendar event by its event ID.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         event_id: {
           type: "string",
           description: "The calendar event ID to delete",
         },
-        calendar_id: {
-          type: "string",
-          description: "Calendar ID (default: \"primary\")",
-        },
-        send_updates: {
-          type: "string",
-          enum: ["all", "externalOnly", "none"],
-          description:
-            "Who to send cancellation notifications to (default: \"all\")",
-        },
+        ...calendarIdParam,
+        ...sendUpdatesParam("cancellation"),
       },
       required: ["event_id"],
     },
@@ -318,7 +312,7 @@ export const calendarTools: ToolDef[] = [
     description:
       "Check availability (free/busy) for one or more people over a time range. Useful for finding open slots to schedule meetings.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         time_min: {
           type: "string",
@@ -428,7 +422,7 @@ export async function handleCalendar(
         // description gets the HTML→text treatment (untruncated).
         event.description = descriptionText(event.description, Infinity);
       }
-      return jsonResponse(result.data);
+      return jsonResponse(event);
     }
 
     case "calendar_create_event": {

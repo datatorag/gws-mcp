@@ -9,21 +9,21 @@ export const authTools: ToolDef[] = [
     description:
       "Check or manage Google Workspace authentication. In HTTP mode, auth is handled via the MCP OAuth flow. In extension/stdio mode (Claude Desktop), use action 'login' to authenticate or re-authenticate with updated scopes.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         action: {
-          type: "string" as const,
+          type: "string",
           enum: ["status", "login"],
           description:
             "Action to perform: 'status' (default) checks auth state, 'login' triggers browser-based OAuth login (extension/stdio mode only).",
         },
         services: {
-          type: "string" as const,
+          type: "string",
           description:
             "Comma-separated services to request scopes for (e.g. 'drive,gmail,tasks'). Only used with action 'login'. Defaults to all supported services.",
         },
       },
-      required: [] as string[],
+      required: [],
     },
     annotations: CREATE("Check or change Google authentication"),
   },

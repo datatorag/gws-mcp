@@ -1,5 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
-import type { GwsClient } from "../gws-client.js";
+import { describe, expect, it } from "vitest";
 import { CREATE, MUTATE } from "./annotations.js";
 import {
   handleSheets,
@@ -7,22 +6,7 @@ import {
   sheetsTools,
   tabNameFromRange,
 } from "./sheets.js";
-
-/** A GwsClient stand-in: `calls` records every api() invocation, `plan`
- * decides each call's fate in order. */
-function fakeClient(
-  plan: Array<{ data?: unknown; throws?: string }>
-): { client: GwsClient; calls: Array<Record<string, unknown>> } {
-  const calls: Array<Record<string, unknown>> = [];
-  const api = vi.fn(async (service, resource, method, opts) => {
-    calls.push({ service, resource, method, ...opts });
-    const step = plan.shift();
-    if (!step) throw new Error("fake client: no planned response left");
-    if (step.throws) throw new Error(step.throws);
-    return { success: true, data: step.data };
-  });
-  return { client: { api } as unknown as GwsClient, calls };
-}
+import { fakeClient, payload } from "./fake-client.test-helper.js";
 
 describe("tabNameFromRange", () => {
   it.each([
@@ -87,7 +71,7 @@ describe("sheets_add_tab", () => {
       params: { spreadsheetId: "sheet-1" },
       jsonBody: { requests: [{ addSheet: { properties: { title: "Inventory" } } }] },
     });
-    expect(JSON.parse(result.content[0].text)).toEqual({
+    expect(payload(result)).toEqual({
       sheetId: 852183133,
       title: "Inventory",
     });
@@ -244,7 +228,7 @@ describe("tab lifecycle", () => {
         ],
       },
     });
-    expect(JSON.parse(result.content[0].text)).toEqual({
+    expect(payload(result)).toEqual({
       sheetId: 852183133,
       title: "Vendors",
       previousTitle: "Inventory",
@@ -296,7 +280,7 @@ describe("tab lifecycle", () => {
       method: "clear",
       params: { range: "Inventory" },
     });
-    expect(JSON.parse(result.content[0].text)).toEqual({
+    expect(payload(result)).toEqual({
       clearedRange: "Inventory!A1:D50",
     });
   });

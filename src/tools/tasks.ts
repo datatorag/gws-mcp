@@ -7,7 +7,7 @@ export const tasksTools: ToolDef[] = [
     name: "tasks_list",
     description: "List all task lists for the authenticated user.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {},
     },
     annotations: READ("List task lists"),
@@ -17,7 +17,7 @@ export const tasksTools: ToolDef[] = [
     description:
       "List tasks in a specific task list. Returns task titles, statuses, due dates, and notes.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         tasklist_id: {
           type: "string",
@@ -41,7 +41,7 @@ export const tasksTools: ToolDef[] = [
     name: "tasks_create",
     description: "Create a new task in a task list.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         tasklist_id: {
           type: "string",
@@ -68,7 +68,7 @@ export const tasksTools: ToolDef[] = [
     name: "tasks_update",
     description: "Update an existing task's title, notes, or due date.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         tasklist_id: {
           type: "string",
@@ -99,7 +99,7 @@ export const tasksTools: ToolDef[] = [
     name: "tasks_complete",
     description: "Mark a task as completed.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         tasklist_id: {
           type: "string",
@@ -118,7 +118,7 @@ export const tasksTools: ToolDef[] = [
     name: "tasks_delete",
     description: "Delete a task from a task list.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         tasklist_id: {
           type: "string",

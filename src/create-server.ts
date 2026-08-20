@@ -3,7 +3,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { GwsClient } from "./gws-client.js";
+import { GwsClient, errorMessage } from "./gws-client.js";
 import { allTools, toolHandlers } from "./tools/index.js";
 import { validateArgs } from "./tools/validate.js";
 
@@ -44,9 +44,8 @@ export function createMcpServer(client?: GwsClient): Server {
       if (tool) validateArgs(tool, args as Record<string, unknown>);
       return await handler(client, name, args as Record<string, unknown>);
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
       return {
-        content: [{ type: "text" as const, text: `Error: ${message}` }],
+        content: [{ type: "text" as const, text: `Error: ${errorMessage(err)}` }],
         isError: true,
       };
     }

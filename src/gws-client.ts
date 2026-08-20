@@ -42,29 +42,51 @@ const SERVICE_SCOPES: Record<string, string[]> = {
   ],
 };
 
+// One keyword per DEFAULT_SERVICES entry, matched as a substring of the
+// granted scope URLs so short forms match too. Lives here, next to
+// SERVICE_SCOPES, because the two lists mirror each other: a service added
+// above needs its keyword added here or the re-auth check won't ask for it.
+export const REQUIRED_SCOPE_KEYWORDS = [
+  "drive",
+  "gmail",
+  "calendar",
+  "documents",
+  "spreadsheets",
+  "presentations",
+  "contacts",
+  "tasks",
+];
+
 /**
  * Resolve service names to explicit OAuth scopes (the binary appends
  * openid/userinfo.email itself). Returns undefined if any service is unknown,
  * so callers can fall back to the binary's own -s picker.
  */
 export function scopesForServices(services: string): string[] | undefined {
-  const names = services.split(",").map((s) => s.trim()).filter(Boolean);
-  const scopes = names.map((name) => SERVICE_SCOPES[name]);
-  if (scopes.some((s) => s === undefined)) return undefined;
-  return [...new Set(scopes.flat() as string[])];
+  const out: string[] = [];
+  for (const name of services.split(",").map((s) => s.trim()).filter(Boolean)) {
+    const scopes = SERVICE_SCOPES[name];
+    if (!scopes) return undefined;
+    out.push(...scopes);
+  }
+  return [...new Set(out)];
+}
+
+/** The message of anything thrown, without every catch site re-deriving it. */
+export function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 let _bundledOAuth: { clientId?: string; clientSecret?: string } | undefined;
 function loadBundledOAuth(): { clientId?: string; clientSecret?: string } {
-  if (!_bundledOAuth) {
-    try {
-      const raw = readFileSync(path.join(__dirname, "oauth.json"), "utf-8");
-      _bundledOAuth = JSON.parse(raw);
-    } catch {
-      _bundledOAuth = {};
-    }
+  if (_bundledOAuth) return _bundledOAuth;
+  try {
+    const raw = readFileSync(path.join(__dirname, "oauth.json"), "utf-8");
+    _bundledOAuth = JSON.parse(raw) as { clientId?: string; clientSecret?: string };
+  } catch {
+    _bundledOAuth = {};
   }
-  return _bundledOAuth!;
+  return _bundledOAuth;
 }
 
 export interface GwsResult {
@@ -167,12 +189,10 @@ export interface GwsClientOptions {
 }
 
 export class GwsClient {
-  private binaryPath: string;
   private mergedEnv: NodeJS.ProcessEnv;
   private defaultAccessToken?: string;
 
   constructor(options?: GwsClientOptions) {
-    this.binaryPath = gwsBinaryPath;
     const env: Record<string, string> = {};
     const bundled = loadBundledOAuth();
     const clientId = process.env.GWS_OAUTH_CLIENT_ID || bundled.clientId;
@@ -187,19 +207,17 @@ export class GwsClient {
     this.defaultAccessToken = options?.accessToken;
   }
 
-  /** Returns a new GwsClient that uses the given access token for all calls. */
+  /** Returns a new GwsClient that uses the given access token for all calls.
+   * The constructor is deterministic (env + cached bundled OAuth), so a plain
+   * re-construction gives the same client without prototype surgery. */
   withToken(accessToken: string): GwsClient {
-    const clone = Object.create(GwsClient.prototype) as GwsClient;
-    clone.binaryPath = this.binaryPath;
-    clone.mergedEnv = this.mergedEnv;
-    clone.defaultAccessToken = accessToken;
-    return clone;
+    return new GwsClient({ accessToken });
   }
 
   /** Clear stored credentials so the next login gets a fresh token. */
   async logout(): Promise<void> {
     try {
-      await execFileAsync(this.binaryPath, ["auth", "logout"], {
+      await execFileAsync(gwsBinaryPath, ["auth", "logout"], {
         timeout: 10_000,
         env: this.mergedEnv,
         cwd: os.tmpdir(),
@@ -216,7 +234,7 @@ export class GwsClient {
       ? ["--scopes", scopes.join(",")]
       : ["-s", services];
     const child = spawn(
-      this.binaryPath,
+      gwsBinaryPath,
       ["auth", "login", ...scopeArgs],
       { env: this.mergedEnv, stdio: ["ignore", "pipe", "pipe"] }
     );
@@ -255,16 +273,16 @@ export class GwsClient {
 
   async exec(
     args: string[],
-    options?: { timeout?: number; accessToken?: string }
+    options?: { timeout?: number }
   ): Promise<GwsResult> {
     const timeout = options?.timeout ?? 30_000;
-    const token = options?.accessToken || this.defaultAccessToken;
+    const token = this.defaultAccessToken;
     const env = token
       ? { ...this.mergedEnv, GOOGLE_WORKSPACE_CLI_TOKEN: token }
       : this.mergedEnv;
 
     try {
-      const { stdout, stderr } = await execFileAsync(this.binaryPath, args, {
+      const { stdout, stderr } = await execFileAsync(gwsBinaryPath, args, {
         timeout,
         maxBuffer: 10 * 1024 * 1024,
         env,
@@ -321,15 +339,13 @@ export class GwsClient {
     service: string,
     command: string,
     flags: Record<string, string>,
-    accessToken?: string
+    opts?: { positional?: string[]; timeout?: number }
   ): Promise<GwsResult> {
-    const args = [service, `+${command}`];
+    const args = [service, `+${command}`, ...(opts?.positional ?? [])];
     for (const [key, value] of Object.entries(flags)) {
-      if (value !== undefined && value !== "") {
-        args.push(`--${key}`, value);
-      }
+      if (value) args.push(`--${key}`, value);
     }
-    return this.exec(args, { accessToken });
+    return this.exec(args, { timeout: opts?.timeout });
   }
 
   async api(
@@ -341,7 +357,6 @@ export class GwsClient {
       jsonBody?: unknown;
       pageAll?: boolean;
       dryRun?: boolean;
-      accessToken?: string;
     }
   ): Promise<GwsResult> {
     const args = [service, ...resource.split("."), method];
@@ -361,7 +376,7 @@ export class GwsClient {
     }
 
     const timeout = options?.pageAll ? 120_000 : 30_000;
-    return this.exec(args, { timeout, accessToken: options?.accessToken });
+    return this.exec(args, { timeout });
   }
 
   async authStatus(): Promise<GwsResult> {

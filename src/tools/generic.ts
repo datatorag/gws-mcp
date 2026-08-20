@@ -8,7 +8,7 @@ export const genericTools: ToolDef[] = [
     description:
       "FALLBACK ONLY — use dedicated tools first (gmail_*, calendar_*, drive_*, sheets_*, docs_*, slides_*, contacts_*). Only use gws_run when no dedicated tool exists for the operation, e.g. Chat, Admin, Tasks, or advanced API calls not covered by other tools. Commands follow the pattern: gws <service> <resource> <method>.",
     inputSchema: {
-      type: "object" as const,
+      type: "object",
       properties: {
         service: {
           type: "string",
