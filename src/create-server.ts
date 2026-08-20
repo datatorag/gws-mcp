@@ -5,6 +5,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { GwsClient } from "./gws-client.js";
 import { allTools, toolHandlers } from "./tools/index.js";
+import { validateArgs } from "./tools/validate.js";
 
 export const gwsClient = new GwsClient();
 
@@ -35,6 +36,12 @@ export function createMcpServer(client?: GwsClient): Server {
           isError: true,
         };
       }
+      // Validate against the tool's own advertised schema before the call
+      // leaves us. The low-level Server does not do this, so without it a
+      // missing or misspelled argument reaches Google and comes back as an
+      // error describing Google's state rather than the caller's mistake.
+      const tool = allTools.find((t) => t.name === name);
+      if (tool) validateArgs(tool, args as Record<string, unknown>);
       return await handler(client, name, args as Record<string, unknown>);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

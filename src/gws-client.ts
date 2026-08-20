@@ -72,6 +72,75 @@ export interface GwsResult {
   data: unknown;
 }
 
+/** An error the caller should retry rather than reason about.
+ *
+ * These arrive as ordinary API errors and read like permanent ones, so a
+ * caller — human or model — treats "Proxy failed to connect to upstream
+ * server" as a fact about the request and rewrites a call that was correct.
+ * Two different sessions hit that same message on one day and both succeeded
+ * on an immediate retry. Naming the class is the whole fix: nothing here
+ * retries on the caller's behalf, because a retry that hides a real outage is
+ * how a broken integration looks healthy. */
+export class TransientGwsError extends Error {
+  readonly retryable = true;
+  constructor(message: string) {
+    super(`${message}\n\n[transient — this usually succeeds on an immediate retry]`);
+    this.name = "TransientGwsError";
+  }
+}
+
+/** Failures of the path to Google rather than of the request itself.
+ * Deliberately narrow: a pattern that also matches a permanent failure would
+ * send callers into a retry loop against a wall. */
+const TRANSIENT_PATTERNS = [
+  /proxy failed to connect to upstream/i,
+  /\b(502|503|504)\b/,
+  /bad gateway|service unavailable|gateway time-?out/i,
+  /ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|socket hang ?up/i,
+  /backendError|rateLimitExceeded|userRateLimitExceeded/,
+];
+
+/** Exported for test: the classification is the whole feature, so pinning the
+ * constructor without pinning what reaches it would pin nothing. */
+export function isTransient(message: string): boolean {
+  return TRANSIENT_PATTERNS.some((p) => p.test(message));
+}
+
+/** Throw `message` as transient when it looks like one, plain otherwise. */
+function throwGwsError(message: string): never {
+  throw isTransient(message) ? new TransientGwsError(message) : new Error(message);
+}
+
+/**
+ * Reject array-valued query parameters, which this transport cannot carry.
+ *
+ * Params reach the binary as one `--params` JSON blob, and it flattens each
+ * value to a single query string: `ranges: ["A!A1", "A!A9"]` goes out as the
+ * literal `ranges=["A!A1","A!A9"]`. Google answers `Unable to parse range`
+ * with the JSON array printed back — an error about the caller's RANGES,
+ * which are fine, rather than about the encoding, which is not. The same
+ * flattening silently returned zero headers for `metadataHeaders` until the
+ * comment at gmail.ts:525 pinned it down.
+ *
+ * Nothing here can fix it: URL construction happens inside the binary. So
+ * fail before the call with the reason, rather than after it with a message
+ * that sends the caller to rewrite correct A1 notation. Repeated-parameter
+ * support belongs in the gws binary; until then, callers should issue one
+ * request per value.
+ */
+function assertScalarParams(params: Record<string, unknown>): void {
+  const arrays = Object.entries(params)
+    .filter(([, value]) => Array.isArray(value))
+    .map(([key]) => key);
+  if (arrays.length === 0) return;
+  throw new Error(
+    `Array-valued parameters are not supported by the gws CLI transport: ` +
+      `${arrays.map((k) => `"${k}"`).join(", ")}. ` +
+      `The binary serialises them into a single query value (ranges=["A1","A2"]), ` +
+      `which the API rejects as a malformed range. Issue one call per value instead.`
+  );
+}
+
 function getGwsBinaryPath(): string {
   const platform = process.platform;
   const arch = process.arch;
@@ -240,13 +309,11 @@ export class GwsClient {
           // stdout wasn't JSON — fall through to the generic error below
         }
         if (parsed !== undefined) {
-          throw new Error(`API error: ${JSON.stringify(parsed)}`);
+          throwGwsError(`API error: ${JSON.stringify(parsed)}`);
         }
       }
 
-      throw new Error(
-        error.stderr || error.message || "Unknown gws error"
-      );
+      throwGwsError(error.stderr || error.message || "Unknown gws error");
     }
   }
 
@@ -280,6 +347,7 @@ export class GwsClient {
     const args = [service, ...resource.split("."), method];
 
     if (options?.params) {
+      assertScalarParams(options.params);
       args.push("--params", JSON.stringify(options.params));
     }
     if (options?.jsonBody) {

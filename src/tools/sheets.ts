@@ -94,6 +94,46 @@ const parseFormulasParam = {
   },
 } as const;
 
+const valueInputOptionParam = {
+  value_input_option: {
+    type: "string",
+    enum: ["USER_ENTERED", "RAW"],
+    description:
+      "How Sheets interprets the values. USER_ENTERED (default) parses numbers, dates and booleans as typing them would, with formula-prefixed text kept inert unless parse_formulas is set. RAW stores every value verbatim as text: formulas never evaluate, but numbers arrive as text and break SUM/charts — use it only when literal-text semantics are the point.",
+  },
+} as const;
+
+/**
+ * The write mode and the formula guard resolve together because they are not
+ * independent: escaping is part of what "USER_ENTERED" means here (SCRUM-46),
+ * and RAW must NOT be escaped — RAW stores exactly what it is sent, so the
+ * apostrophe would become a permanent literal character instead of a prefix
+ * Sheets strips on read.
+ *
+ * Naming USER_ENTERED explicitly is not an opt-out of the guard. The default
+ * is ESCAPED USER_ENTERED whether the caller writes the word or not;
+ * `parse_formulas` is the only path to unescaped evaluation (SCRUM-121).
+ */
+function resolveValueInput(args: Record<string, unknown>): {
+  valueInputOption: "USER_ENTERED" | "RAW";
+  values: unknown;
+} {
+  if (args.value_input_option === "RAW") {
+    if (args.parse_formulas === true) {
+      throw new Error(
+        'parse_formulas cannot be combined with value_input_option "RAW": ' +
+          "RAW never evaluates anything, so the formulas would land as inert " +
+          "text while the call reports success. Drop one of the two."
+      );
+    }
+    return { valueInputOption: "RAW", values: args.values };
+  }
+  return {
+    valueInputOption: "USER_ENTERED",
+    values: guardValues(args.values, args.parse_formulas),
+  };
+}
+
 export const sheetsTools: ToolDef[] = [
   {
     name: "sheets_read",
@@ -110,6 +150,12 @@ export const sheetsTools: ToolDef[] = [
           type: "string",
           description:
             "Cell range in A1 notation (e.g., \"Sheet1!A1:D10\", \"A1:Z\")",
+        },
+        value_render_option: {
+          type: "string",
+          enum: ["FORMATTED_VALUE", "UNFORMATTED_VALUE", "FORMULA"],
+          description:
+            "How values are rendered. FORMATTED_VALUE (default) returns what the cell displays. UNFORMATTED_VALUE returns the underlying typed value, which is how you tell a stored number from stored text. FORMULA returns the cell's formula where it has one — the only way to tell a live formula from text that merely looks like one, so use it to verify a write.",
         },
       },
       required: ["spreadsheet_id", "range"],
@@ -141,6 +187,7 @@ export const sheetsTools: ToolDef[] = [
             "2D array of values to write (rows of columns), e.g., [[\"A1\",\"B1\"],[\"A2\",\"B2\"]]",
         },
         ...parseFormulasParam,
+        ...valueInputOptionParam,
       },
       required: ["spreadsheet_id", "range", "values"],
     },
@@ -172,6 +219,7 @@ export const sheetsTools: ToolDef[] = [
             "Target range for appending (default: first sheet). e.g., \"Sheet1!A1\"",
         },
         ...parseFormulasParam,
+        ...valueInputOptionParam,
       },
       required: ["spreadsheet_id", "values"],
     },
@@ -454,6 +502,12 @@ async function dispatchSheets(
           params: {
             spreadsheetId: args.spreadsheet_id,
             range: args.range,
+            // Omitted entirely when unset: the API's own default is
+            // FORMATTED_VALUE, and sending it explicitly would be a second
+            // place for that default to drift from Google's.
+            ...(args.value_render_option
+              ? { valueRenderOption: args.value_render_option }
+              : {}),
           },
         }
       );
@@ -474,6 +528,7 @@ async function dispatchSheets(
     }
 
     case "sheets_update": {
+      const { valueInputOption, values } = resolveValueInput(args);
       const result = await client.api(
         "sheets",
         "spreadsheets.values",
@@ -482,11 +537,9 @@ async function dispatchSheets(
           params: {
             spreadsheetId: args.spreadsheet_id,
             range: args.range,
-            valueInputOption: "USER_ENTERED",
+            valueInputOption,
           },
-          jsonBody: {
-            values: guardValues(args.values, args.parse_formulas),
-          },
+          jsonBody: { values },
         }
       );
       return jsonResponse(result.data);
@@ -494,6 +547,7 @@ async function dispatchSheets(
 
     case "sheets_append": {
       const range = (args.range as string) || APPEND_DEFAULT_RANGE;
+      const { valueInputOption, values } = resolveValueInput(args);
       const result = await client.api(
         "sheets",
         "spreadsheets.values",
@@ -502,12 +556,10 @@ async function dispatchSheets(
           params: {
             spreadsheetId: args.spreadsheet_id,
             range,
-            valueInputOption: "USER_ENTERED",
+            valueInputOption,
             insertDataOption: "INSERT_ROWS",
           },
-          jsonBody: {
-            values: guardValues(args.values, args.parse_formulas),
-          },
+          jsonBody: { values },
         }
       );
       return jsonResponse(result.data);
