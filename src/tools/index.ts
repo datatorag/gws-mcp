@@ -8,6 +8,7 @@ import { calendarTools, handleCalendar } from "./calendar.js";
 import { contactsTools, handleContacts } from "./contacts.js";
 import { sheetsTools, handleSheets } from "./sheets.js";
 import { sheetsRowTools, handleSheetsRows } from "./sheets-rows.js";
+import { sheetsFormatTools, handleSheetsFormat } from "./sheets-format.js";
 import { docsTools, handleDocs } from "./docs.js";
 import { slidesTools, handleSlides } from "./slides.js";
 import { tasksTools, handleTasks } from "./tasks.js";
@@ -28,6 +29,7 @@ const modules: [ToolDef[], ToolHandler][] = [
   [driveTools, handleDrive],
   [sheetsTools, handleSheets],
   [sheetsRowTools, handleSheetsRows],
+  [sheetsFormatTools, handleSheetsFormat],
   [docsTools, handleDocs],
   [slidesTools, handleSlides],
   [tasksTools, handleTasks],
