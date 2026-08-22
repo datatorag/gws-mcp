@@ -253,7 +253,7 @@ export const sheetsTools: ToolDef[] = [
         requests: {
           type: "array",
           description:
-            'Array of Sheets API batchUpdate request objects, applied in order. Common ones: updateSheetProperties (freeze rows, hide gridlines, tab colour), updateDimensionProperties (column width, row height), insertDimension and deleteDimension (add or remove rows and columns \u2014 these SHIFT every index after them, so put them first), repeatCell (fonts, colour, wrap, alignment, number format), mergeCells, updateBorders, copyPaste, duplicateSheet. Example: [{ "updateDimensionProperties": { "range": { "sheetId": 0, "dimension": "COLUMNS", "startIndex": 1, "endIndex": 4 }, "properties": { "pixelSize": 400 }, "fields": "pixelSize" } }]',
+            'Array of Sheets API batchUpdate request objects, applied in order. Common ones: updateSheetProperties (freeze rows, hide gridlines, tab colour), updateDimensionProperties (column width, row height), insertDimension and deleteDimension (add or remove rows and columns, and these SHIFT every index after them, so put them first), repeatCell (fonts, colour, wrap, alignment, number format), mergeCells, updateBorders, copyPaste, duplicateSheet. Example: [{ "updateDimensionProperties": { "range": { "sheetId": 0, "dimension": "COLUMNS", "startIndex": 1, "endIndex": 4 }, "properties": { "pixelSize": 400 }, "fields": "pixelSize" } }]',
           items: { type: "object" },
         },
       },
