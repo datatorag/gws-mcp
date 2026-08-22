@@ -7,6 +7,7 @@ import { driveTools, handleDrive } from "./drive.js";
 import { calendarTools, handleCalendar } from "./calendar.js";
 import { contactsTools, handleContacts } from "./contacts.js";
 import { sheetsTools, handleSheets } from "./sheets.js";
+import { sheetsRowTools, handleSheetsRows } from "./sheets-rows.js";
 import { docsTools, handleDocs } from "./docs.js";
 import { slidesTools, handleSlides } from "./slides.js";
 import { tasksTools, handleTasks } from "./tasks.js";
@@ -26,6 +27,7 @@ const modules: [ToolDef[], ToolHandler][] = [
   [contactsTools, handleContacts],
   [driveTools, handleDrive],
   [sheetsTools, handleSheets],
+  [sheetsRowTools, handleSheetsRows],
   [docsTools, handleDocs],
   [slidesTools, handleSlides],
   [tasksTools, handleTasks],
