@@ -2,6 +2,19 @@ import { errorMessage, type GwsClient } from "../gws-client.js";
 import { CREATE, MUTATE, READ, ToolDef } from "./annotations.js";
 import { jsonResponse, deleteResponse } from "./response.js";
 import { deleteDriveFileResponse } from "./drive-ops.js";
+import {
+  listTabs,
+  noSuchTabError,
+  quoteTabForRange,
+  resolveSheetId,
+  tabNameFromRange,
+  tabTitles,
+} from "./sheets-grid.js";
+
+// The grid helpers moved to sheets-grid.js so the formatting and row tools can
+// share them. Re-exported here because callers already import them from this
+// module, and a rename is not what this change is for.
+export { quoteTabForRange, tabNameFromRange };
 
 /** Values whose first character makes Sheets treat the cell as a formula.
  *
@@ -365,55 +378,7 @@ export const sheetsTools: ToolDef[] = [
 
 /* ----------------------- range / tab error helpers ------------------------ */
 
-/** The sheet-name prefix of an A1 range ("'Q3 Data'!A1:B2" → "Q3 Data",
- * "Sheet1!A:A" → "Sheet1"), or undefined when the range has no tab prefix.
- * A doubled single quote inside a quoted name is the A1 escape for one. */
-export function tabNameFromRange(range: string): string | undefined {
-  const quoted = /^'((?:[^']|'')*)'!/.exec(range);
-  if (quoted) return quoted[1].replace(/''/g, "'");
-  // A leading quote that didn't match is an unterminated/garbled quoted
-  // prefix — not a bare tab name for the fallback below to mangle.
-  if (range.startsWith("'")) return undefined;
-  const bang = range.indexOf("!");
-  return bang > 0 ? range.slice(0, bang) : undefined;
-}
-
-/** A tab title as it must appear inside an A1 range: quoted, with internal
- * single quotes doubled. */
-export function quoteTabForRange(title: string): string {
-  return `'${title.replace(/'/g, "''")}'`;
-}
-
 const UNPARSEABLE_RANGE = /unable to parse range/i;
-
-/** The one tab-list fetch behind both the missing-tab diagnosis and
- * title→sheetId resolution — the two used to carry their own copies and had
- * already drifted apart. */
-async function listTabs(
-  client: GwsClient,
-  spreadsheetId: unknown
-): Promise<{ sheetId?: number; title?: string }[]> {
-  const result = await client.api("sheets", "spreadsheets", "get", {
-    params: { spreadsheetId, fields: "sheets.properties(sheetId,title)" },
-  });
-  const data = result.data as {
-    sheets?: { properties?: { sheetId?: number; title?: string } }[];
-  };
-  return (data.sheets ?? []).map((sheet) => sheet.properties ?? {});
-}
-
-function tabTitles(props: { title?: string }[]): string[] {
-  return props
-    .map((p) => p.title)
-    .filter((t): t is string => typeof t === "string");
-}
-
-function noSuchTabError(tab: string, titles: string[], hint = ""): Error {
-  return new Error(
-    `No sheet named "${tab}" in this spreadsheet. Existing tabs: ` +
-      `${titles.map((t) => `"${t}"`).join(", ") || "(none)"}.${hint}`
-  );
-}
 
 /** Google reports a range naming a missing tab as a SYNTAX error ("Unable to
  * parse range: …"), which sends users off to rewrite perfectly valid A1
@@ -438,26 +403,6 @@ async function missingTabError(
   }
   if (titles.includes(tab)) return undefined;
   return noSuchTabError(tab, titles, " Create it first with sheets_add_tab.");
-}
-
-/** Resolve a tab title to the sheetId the batchUpdate API needs.
- *
- * Callers address tabs the way people do — by title — because a sheetId is
- * an arbitrary identifier nobody has to hand (and, as sheets_add_tab's
- * comment notes, the first tab is not id 0). A title that does not exist
- * fails with the same list-the-real-tabs message the range path gives,
- * rather than an API error about a sheetId the caller never supplied. */
-async function resolveSheetId(
-  client: GwsClient,
-  spreadsheetId: unknown,
-  title: string
-): Promise<number> {
-  const props = await listTabs(client, spreadsheetId);
-  const match = props.find((p) => p.title === title);
-  if (match?.sheetId === undefined) {
-    throw noSuchTabError(title, tabTitles(props));
-  }
-  return match.sheetId;
 }
 
 /** Read a range and square it up (rows padded to equal width), for callers
