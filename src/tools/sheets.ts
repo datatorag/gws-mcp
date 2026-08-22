@@ -240,6 +240,28 @@ export const sheetsTools: ToolDef[] = [
     annotations: CREATE("Append spreadsheet rows"),
   },
   {
+    name: "sheets_batch_update",
+    description:
+      "Apply a batch of structural and formatting changes to a spreadsheet, in ONE atomic call. This is the full Google Sheets batchUpdate pass-through and the escape hatch beneath the job-shaped tools: reach for sheets_format_range or sheets_format_table first, and come here for anything they do not cover (merges, borders, banding, copyPaste, inserting or deleting COLUMNS, duplicateSheet, protected ranges). TWO PROPERTIES THAT BITE. (1) Ranges here are a GridRange, which is 0-BASED and END-EXCLUSIVE: spreadsheet row 7 is startRowIndex 6, endRowIndex 7. That is the opposite convention from the A1 notation used to write the values. (2) The batch is ATOMIC: if one request is rejected the whole batch applies nothing, and the error names the failing request's index. Build the whole pass as one batch, fix the named index, re-send the whole thing. Note that empty reply objects are normal for formatting requests and mean ACCEPTED, not applied to what you meant.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        spreadsheet_id: {
+          type: "string",
+          description: "The spreadsheet ID",
+        },
+        requests: {
+          type: "array",
+          description:
+            'Array of Sheets API batchUpdate request objects, applied in order. Common ones: updateSheetProperties (freeze rows, hide gridlines, tab colour), updateDimensionProperties (column width, row height), insertDimension and deleteDimension (add or remove rows and columns \u2014 these SHIFT every index after them, so put them first), repeatCell (fonts, colour, wrap, alignment, number format), mergeCells, updateBorders, copyPaste, duplicateSheet. Example: [{ "updateDimensionProperties": { "range": { "sheetId": 0, "dimension": "COLUMNS", "startIndex": 1, "endIndex": 4 }, "properties": { "pixelSize": 400 }, "fields": "pixelSize" } }]',
+          items: { type: "object" },
+        },
+      },
+      required: ["spreadsheet_id", "requests"],
+    },
+    annotations: MUTATE("Apply a batch of changes to a spreadsheet"),
+  },
+  {
     name: "sheets_create",
     description: "Create a new Google Sheets spreadsheet.",
     inputSchema: {
@@ -522,6 +544,19 @@ async function dispatchSheets(
           jsonBody: { values },
         }
       );
+      return jsonResponse(result.data);
+    }
+
+    case "sheets_batch_update": {
+      // A pass-through, deliberately uncurated: the Docs twin documents three
+      // request types and passes everything, and that turned out to be the
+      // right call. Nothing here retries, splits, or reorders the requests —
+      // the endpoint is atomic and callers depend on there being no partial
+      // state, so a wrapper that reapplied "the good half" would invent one.
+      const result = await client.api("sheets", "spreadsheets", "batchUpdate", {
+        params: { spreadsheetId: args.spreadsheet_id },
+        jsonBody: { requests: args.requests },
+      });
       return jsonResponse(result.data);
     }
 

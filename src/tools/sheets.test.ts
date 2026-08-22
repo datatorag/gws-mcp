@@ -579,3 +579,86 @@ describe("sheets_read value_render_option", () => {
     expect(option?.enum).toContain("FORMULA");
   });
 });
+
+describe("sheets_batch_update", () => {
+  it("passes the requests straight through to the Sheets batchUpdate endpoint", async () => {
+    const { client, calls } = fakeClient([{ data: { replies: [{}, {}] } }]);
+    const requests = [
+      {
+        updateSheetProperties: {
+          properties: { sheetId: 852183133, gridProperties: { frozenRowCount: 1 } },
+          fields: "gridProperties.frozenRowCount",
+        },
+      },
+      {
+        repeatCell: {
+          range: { sheetId: 852183133, startRowIndex: 0, endRowIndex: 1 },
+          cell: { userEnteredFormat: { textFormat: { bold: true } } },
+          fields: "userEnteredFormat(textFormat(bold))",
+        },
+      },
+    ];
+
+    const result = await handleSheets(client, "sheets_batch_update", {
+      spreadsheet_id: "sheet-1",
+      requests,
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      service: "sheets",
+      resource: "spreadsheets",
+      method: "batchUpdate",
+      params: { spreadsheetId: "sheet-1" },
+      jsonBody: { requests },
+    });
+    // The replies are returned verbatim. Empty reply objects are NORMAL for
+    // formatting requests and mean accepted, not applied — a caller has to be
+    // able to see that for itself rather than be told a summary.
+    expect(payload(result)).toEqual({ replies: [{}, {}] });
+  });
+
+  it("does not curate the request types, so an unfamiliar one still goes through", async () => {
+    // docs_batch_update documents three request types and passes everything,
+    // and that turned out to be right: a curated allowlist becomes a second
+    // place for Google's API surface to drift from ours.
+    const { client, calls } = fakeClient([{ data: { replies: [{}] } }]);
+    const exotic = [{ addBanding: { bandedRange: { range: { sheetId: 7 } } } }];
+
+    await handleSheets(client, "sheets_batch_update", {
+      spreadsheet_id: "sheet-1",
+      requests: exotic,
+    });
+
+    expect((calls[0] as { jsonBody: { requests: unknown } }).jsonBody.requests).toEqual(exotic);
+  });
+
+  it("makes exactly ONE call and never retries or splits a rejected batch", async () => {
+    // The Sheets batchUpdate is ATOMIC: a batch that fails on one request
+    // applies none of the others. Callers depend on there being no partial
+    // state, so a wrapper that retried the good half would be a correctness
+    // bug wearing a resilience costume. If anyone adds a retry, this reddens.
+    const rejection =
+      'API error: {"error":{"code":400,"message":"Invalid requests[6].mergeCells: ' +
+      "You can't merge frozen and non-frozen columns.\",\"status\":\"INVALID_ARGUMENT\"}}";
+    const { client, calls } = fakeClient([{ throws: rejection }]);
+
+    await expect(
+      handleSheets(client, "sheets_batch_update", {
+        spreadsheet_id: "sheet-1",
+        requests: [{ mergeCells: {} }],
+      })
+    ).rejects.toThrow(
+      // The request INDEX is the thing that tells you which request was wrong,
+      // so the message reaches the caller unrewritten.
+      /Invalid requests\[6\]\.mergeCells/
+    );
+    expect(calls).toHaveLength(1);
+  });
+
+  it("is pinned to the mutating annotation shape", () => {
+    const tool = sheetsTools.find((t) => t.name === "sheets_batch_update");
+    expect(tool?.annotations).toEqual(MUTATE("Apply a batch of changes to a spreadsheet"));
+    expect(tool?.inputSchema.required).toEqual(["spreadsheet_id", "requests"]);
+  });
+});
