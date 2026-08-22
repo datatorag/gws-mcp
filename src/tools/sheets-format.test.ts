@@ -7,8 +7,20 @@ import { fakeClient } from "./fake-client.test-helper.js";
 const tabs = {
   data: {
     sheets: [
-      { properties: { sheetId: 852183133, title: "Sheet1" } },
-      { properties: { sheetId: 1699353642, title: "Report" } },
+      {
+        properties: {
+          sheetId: 852183133,
+          title: "Sheet1",
+          gridProperties: { rowCount: 1000, columnCount: 26 },
+        },
+      },
+      {
+        properties: {
+          sheetId: 1699353642,
+          title: "Report",
+          gridProperties: { rowCount: 200, columnCount: 8 },
+        },
+      },
     ],
   },
 };
@@ -78,10 +90,7 @@ describe("sheets_format_range", () => {
       green: 0,
       blue: 0,
     });
-    expect(fields).toBe(
-      "userEnteredFormat(backgroundColor(red,green,blue)," +
-        "textFormat(foregroundColor(red,green,blue)))"
-    );
+    expect(fields).toBe("userEnteredFormat(backgroundColor,textFormat(foregroundColor))");
   });
 
   it("applies many ranges and many instructions in ONE atomic batch", async () => {
@@ -138,6 +147,44 @@ describe("sheets_format_range", () => {
       pattern: "#,##0.00",
     });
     expect(fields).toBe("userEnteredFormat(numberFormat(type,pattern))");
+  });
+
+  it.each([
+    ["yyyy-mm-dd", "DATE"],
+    ["hh:mm", "TIME"],
+    ["yyyy-mm-dd hh:mm", "DATE_TIME"],
+    ["0.0%", "PERCENT"],
+    ["$#,##0.00", "CURRENCY"],
+    ["#,##0", "NUMBER"],
+  ])("infers the number format TYPE from the pattern %s", async (pattern, type) => {
+    // The API requires a type alongside the pattern, and a caller who writes
+    // "yyyy-mm-dd" is not thinking about enum values. The inference is a
+    // heuristic over the pattern's tokens; whether each type renders as
+    // expected is what the live smoke verifies, not this test.
+    const { client, calls } = fakeClient([tabs, { data: { replies: [{}] } }]);
+
+    await handleSheetsFormat(client, "sheets_format_range", {
+      spreadsheet_id: "sheet-1",
+      formats: [{ ranges: ["Sheet1!C2"], number_format: pattern }],
+    });
+
+    expect(requestsOf(calls)[0].repeatCell.cell.userEnteredFormat.numberFormat).toEqual({
+      type,
+      pattern,
+    });
+  });
+
+  it("reports requests as SENT, because a reply is an acceptance and not an application", async () => {
+    const { client } = fakeClient([tabs, { data: { replies: [{}] } }]);
+
+    const result = await handleSheetsFormat(client, "sheets_format_range", {
+      spreadsheet_id: "sheet-1",
+      formats: [{ ranges: ["Sheet1!A1"], bold: true }],
+    });
+
+    const body = JSON.parse(result.content[0].text);
+    expect(body).toHaveProperty("requestsSent", 1);
+    expect(body).not.toHaveProperty("requestsApplied");
   });
 
   it("refuses an instruction that sets no properties, instead of a no-op batch", async () => {
@@ -283,9 +330,63 @@ describe("sheets_format_table", () => {
     expect(Object.keys(requests[0])[0]).toBe("deleteDimension");
     const deletes = requests.filter((r) => r.deleteDimension);
     // Columns beyond D and rows beyond 40, each from the range's own end.
+    // Bounded by the grid's real size rather than left open: an endIndex past
+    // the true count is an API error, and an omitted one relies on behaviour
+    // nothing here has exercised live.
     expect(deletes.map((r) => r.deleteDimension.range)).toEqual([
-      { sheetId: 852183133, dimension: "COLUMNS", startIndex: 4 },
-      { sheetId: 852183133, dimension: "ROWS", startIndex: 40 },
+      { sheetId: 852183133, dimension: "COLUMNS", startIndex: 4, endIndex: 26 },
+      { sheetId: 852183133, dimension: "ROWS", startIndex: 40, endIndex: 1000 },
+    ]);
+  });
+
+  it("sets default widths across the WHOLE grid for an unbounded range", async () => {
+    // A bare tab name has no end column. Skipping widths because the bound is
+    // missing silently drops the single highest-value change while reporting
+    // success; the grid's real extent comes from the same single tab fetch.
+    const { client, calls } = fakeClient([tabs, { data: { replies: [] } }]);
+
+    await handleSheetsFormat(client, "sheets_format_table", {
+      spreadsheet_id: "sheet-1",
+      range: "Report",
+      column_widths: [250],
+    });
+
+    const widths = requestsOf(calls)
+      .filter((r) => r.updateDimensionProperties)
+      .map((r) => r.updateDimensionProperties.range);
+    expect(widths).toEqual([
+      { sheetId: 1699353642, dimension: "COLUMNS", startIndex: 0, endIndex: 1 },
+      { sheetId: 1699353642, dimension: "COLUMNS", startIndex: 1, endIndex: 8 },
+    ]);
+  });
+
+  it("skips a trim that has nothing to trim instead of failing the whole batch", async () => {
+    // deleteDimension at startIndex == the grid's size is an API error, and
+    // the batch is atomic, so a no-op trim would take the entire formatting
+    // pass down with it. Report has 8 columns and 200 rows.
+    const { client, calls } = fakeClient([tabs, { data: { replies: [] } }]);
+
+    await handleSheetsFormat(client, "sheets_format_table", {
+      spreadsheet_id: "sheet-1",
+      range: "Report!A1:H200",
+      trim_grid: true,
+    });
+
+    expect(requestsOf(calls).some((r) => r.deleteDimension)).toBe(false);
+  });
+
+  it("trims only the dimension that actually extends past the range", async () => {
+    const { client, calls } = fakeClient([tabs, { data: { replies: [] } }]);
+
+    await handleSheetsFormat(client, "sheets_format_table", {
+      spreadsheet_id: "sheet-1",
+      range: "Report!A1:D200",
+      trim_grid: true,
+    });
+
+    const deletes = requestsOf(calls).filter((r) => r.deleteDimension);
+    expect(deletes.map((r) => r.deleteDimension.range)).toEqual([
+      { sheetId: 1699353642, dimension: "COLUMNS", startIndex: 4, endIndex: 8 },
     ]);
   });
 
@@ -317,7 +418,7 @@ describe("sheets_format_table", () => {
       verticalAlignment: "TOP",
     });
     expect(body.fields).toContain("wrapStrategy");
-    expect(body.fields).toContain("padding(top,right,bottom,left)");
+    expect(body.fields).toContain("padding");
   });
 
   it("skips wrapping when the caller turns it off", async () => {

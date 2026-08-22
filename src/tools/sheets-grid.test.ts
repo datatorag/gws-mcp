@@ -6,6 +6,7 @@ import {
   fieldsMask,
   gridRangeResolver,
   hexToRgbColor,
+  splitRange,
 } from "./sheets-grid.js";
 import { fakeClient } from "./fake-client.test-helper.js";
 
@@ -46,6 +47,15 @@ describe("a1ToGridBounds", () => {
     // Sheets accepts D10:A1 in A1 notation, so rejecting it here would be a
     // new failure mode on input that works everywhere else.
     expect(a1ToGridBounds("D10:A1")).toEqual(a1ToGridBounds("A1:D10"));
+  });
+
+  it("rejects row 0, which does not exist and would become index -1", () => {
+    // A1 rows start at 1. "A0" is not a typo the API corrects, it is a
+    // negative GridRange index that either errors opaquely or, worse, is
+    // clamped to something the caller did not ask for.
+    expect(() => a1ToGridBounds("A0")).toThrow(/row 0/i);
+    expect(() => a1ToGridBounds("A0:B2")).toThrow(/row 0/i);
+    expect(() => a1ToGridBounds("0:0")).toThrow(/row 0/i);
   });
 
   it("throws on an unparseable range instead of returning empty bounds", () => {
@@ -139,6 +149,49 @@ describe("gridRangeResolver", () => {
   });
 });
 
+describe("splitRange", () => {
+  it("treats anything with a colon as cells, never as a tab name", () => {
+    // "A1:" is a broken range, not a tab called "A1:". Routing it to a tab
+    // lookup produces a "no sheet named A1:" error that sends the caller off
+    // to check their tab list instead of their range.
+    expect(() => a1ToGridBounds(splitRange("A1:").cells)).toThrow(/could not be read/i);
+    expect(() => a1ToGridBounds(splitRange(":D10").cells)).toThrow(/could not be read/i);
+    expect(splitRange("A1:")).toEqual({ cells: "A1:" });
+  });
+
+  it("reads a bare tab name, a quoted one, and a name with spaces", () => {
+    expect(splitRange("Inventory")).toEqual({ tab: "Inventory", cells: "" });
+    expect(splitRange("'Q3'")).toEqual({ tab: "Q3", cells: "" });
+    expect(splitRange("Data 2026")).toEqual({ tab: "Data 2026", cells: "" });
+  });
+});
+
+describe("gridRangeResolver grid sizes", () => {
+  it("exposes each tab's real row and column count from the same single fetch", async () => {
+    // Formatting an unbounded range needs the grid's actual extent, and a
+    // second API call to get it would break the one-lookup-per-call rule.
+    const { client, calls } = fakeClient([
+      {
+        data: {
+          sheets: [
+            {
+              properties: {
+                sheetId: 852183133,
+                title: "Sheet1",
+                gridProperties: { rowCount: 1000, columnCount: 26 },
+              },
+            },
+          ],
+        },
+      },
+    ]);
+    const resolve = await gridRangeResolver(client, "sheet-1");
+    expect(resolve.gridSize(852183133)).toEqual({ rowCount: 1000, columnCount: 26 });
+    expect(calls).toHaveLength(1);
+    expect((calls[0] as { params: { fields: string } }).params.fields).toContain("gridProperties");
+  });
+});
+
 describe("hexToRgbColor", () => {
   it("converts to the API's 0-to-1 floats, which is what nobody remembers to do", () => {
     expect(hexToRgbColor("#FFFFFF")).toEqual({ red: 1, green: 1, blue: 1 });
@@ -168,14 +221,25 @@ describe("fieldsMask", () => {
     ).toBe("userEnteredFormat(textFormat(bold),wrapStrategy)");
   });
 
-  it("descends into every nested object", () => {
+  it("descends into nested objects", () => {
+    expect(
+      fieldsMask({ userEnteredFormat: { numberFormat: { type: "NUMBER", pattern: "0.0" } } })
+    ).toBe("userEnteredFormat(numberFormat(type,pattern))");
+  });
+
+  it("treats colours and padding as whole values, matching the masks known to work", () => {
+    // These are always sent complete, so naming their channels individually
+    // buys nothing and is a mask form nothing here has exercised live. The
+    // whole-value form is the one every measured recipe used.
     expect(
       fieldsMask({
         userEnteredFormat: {
+          backgroundColor: { red: 1, green: 1, blue: 1 },
           padding: { top: 8, right: 12, bottom: 8, left: 12 },
+          textFormat: { foregroundColor: { red: 0, green: 0, blue: 0 }, bold: true },
         },
       })
-    ).toBe("userEnteredFormat(padding(top,right,bottom,left))");
+    ).toBe("userEnteredFormat(backgroundColor,padding,textFormat(foregroundColor,bold))");
   });
 
   it("treats an array as a leaf rather than descending into its indices", () => {

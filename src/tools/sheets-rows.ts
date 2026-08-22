@@ -122,6 +122,16 @@ function firstRowOf(range: string): number {
   return m ? Number(m[1]) : 1;
 }
 
+/** The 0-based column a range starts at. A row's values are relative to this
+ * column, so the A1 range handed back for a match has to start here too:
+ * "C10:F12" row 12 is C12:F12, and returning A12:D12 would send a follow-up
+ * update into the wrong four columns without any error. */
+function firstColumnOf(range: string): number {
+  const { cells } = splitRange(range);
+  const m = /^([A-Za-z]{1,3})/.exec(cells.trim());
+  return m ? columnLetterToIndex(m[1]) : 0;
+}
+
 function tabPrefixOf(range: string, fallback: string): string {
   const { tab } = splitRange(range);
   return quoteTabForRange(tab ?? fallback);
@@ -163,6 +173,7 @@ async function findRows(client: GwsClient, args: Record<string, unknown>) {
   // real bounds, and it is what the row numbers below must be counted from.
   const echoed = data.range ?? requested;
   const firstRow = firstRowOf(echoed);
+  const firstColumn = firstColumnOf(echoed);
   const tab = tabPrefixOf(echoed, "Sheet1");
 
   const headers = hasHeader ? rows[0]?.map((h) => String(h ?? "")) : undefined;
@@ -178,7 +189,8 @@ async function findRows(client: GwsClient, args: Record<string, unknown>) {
 
   const column = resolveColumn(args.column as string, headers);
   const width = body.reduce((max, row) => Math.max(max, row.length), 0);
-  const lastColumn = columnIndexToLetter(Math.max(width, column + 1) - 1);
+  const firstLetter = columnIndexToLetter(firstColumn);
+  const lastLetter = columnIndexToLetter(firstColumn + Math.max(width, column + 1) - 1);
 
   const found: unknown[] = [];
   const notFound: string[] = [];
@@ -195,7 +207,7 @@ async function findRows(client: GwsClient, args: Record<string, unknown>) {
       const rowNumber = bodyFirstRow + offset;
       hits.push({
         row: rowNumber,
-        range: `${tab}!A${rowNumber}:${lastColumn}${rowNumber}`,
+        range: `${tab}!${firstLetter}${rowNumber}:${lastLetter}${rowNumber}`,
         values: row,
       });
     }

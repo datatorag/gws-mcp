@@ -81,6 +81,38 @@ describe("sheets_find_rows", () => {
     });
   });
 
+  it("returns a range starting at the searched range's own first COLUMN", async () => {
+    // A range of C10:F12 means the row's values are columns C to F. Returning
+    // A12:D12 for that row hands the caller a range that a follow-up
+    // sheets_update will write into the wrong four columns, with no error
+    // anywhere. The row number alone is not enough; the column offset has to
+    // travel with it.
+    const { client } = fakeClient([
+      {
+        data: {
+          range: "Sheet1!C10:F12",
+          values: [
+            ["Name", "Email", "X", "Y"],
+            ["Ana", "ana@example.com", "1", "2"],
+            ["Bo", "bo@example.com", "3", "4"],
+          ],
+        },
+      },
+    ]);
+
+    const result = await handleSheetsRows(client, "sheets_find_rows", {
+      spreadsheet_id: "sheet-1",
+      range: "Sheet1!C10:F12",
+      column: "Email",
+      values: ["bo@example.com"],
+    });
+
+    expect(payload(result).matches[0].rows[0]).toMatchObject({
+      row: 12,
+      range: "'Sheet1'!C12:F12",
+    });
+  });
+
   it("searches MANY values in one call, which is the batch shape", async () => {
     // One call finds every matching row for every value. The competitor shape
     // is one lookup per call; ours is one call for the whole job.

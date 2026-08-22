@@ -185,15 +185,33 @@ function cellFormatFrom(spec: Record<string, unknown>, index: number): CellForma
   }
   if (typeof spec.wrap === "string") format.wrapStrategy = spec.wrap;
   if (typeof spec.number_format === "string") {
-    // The API wants an object, not a bare pattern. NUMBER covers currency,
-    // percent and plain patterns; DATE and TIME patterns are accepted by it
-    // too, so a single type keeps the parameter to one string.
-    format.numberFormat = { type: "NUMBER", pattern: spec.number_format };
+    format.numberFormat = numberFormatFrom(spec.number_format);
   }
   if (spec.padding && typeof spec.padding === "object") {
     format.padding = spec.padding as Record<string, number>;
   }
   return format;
+}
+
+/** The API wants a `type` next to the pattern, and a caller who writes
+ * "yyyy-mm-dd" is not thinking in enum values. The type is inferred from the
+ * pattern's tokens. THIS IS A HEURISTIC: it picks the type the pattern most
+ * plausibly belongs to, and whether each renders as intended is something the
+ * live smoke test establishes, not this function. A caller who needs a
+ * specific type the heuristic gets wrong can send the full numberFormat
+ * object through sheets_batch_update. */
+function numberFormatFrom(pattern: string): { type: string; pattern: string } {
+  const hasTime = /[hs]|am\/pm/i.test(pattern);
+  // "m" is a month next to y or d and a minute next to h or s, so it only
+  // counts as a date token when nothing in the pattern says otherwise.
+  const hasDate = /[yd]/i.test(pattern) || (/m/i.test(pattern) && !hasTime);
+  let type = "NUMBER";
+  if (hasDate && hasTime) type = "DATE_TIME";
+  else if (hasDate) type = "DATE";
+  else if (hasTime) type = "TIME";
+  else if (pattern.includes("%")) type = "PERCENT";
+  else if (/[$€£¥]/.test(pattern)) type = "CURRENCY";
+  return { type, pattern };
 }
 
 function repeatCell(range: GridRange, format: CellFormat) {
@@ -219,8 +237,11 @@ async function sendBatch(
     jsonBody: { requests },
   });
   const data = result.data as { replies?: unknown[] };
+  // "Sent", not "applied". Empty reply objects are what a formatting request
+  // returns on acceptance; they say nothing about whether the result is what
+  // the caller meant. Only looking at the sheet can say that.
   return jsonResponse({
-    requestsApplied: requests.length,
+    requestsSent: requests.length,
     replies: data?.replies ?? [],
   });
 }
@@ -300,6 +321,7 @@ async function formatTable(client: GwsClient, args: Record<string, unknown>) {
   const firstRow = grid.startRowIndex ?? 0;
   const firstCol = grid.startColumnIndex ?? 0;
   const { sheetId } = grid;
+  const size = resolve.gridSize(sheetId);
   const requests: unknown[] = [];
 
   // TRIM FIRST. Deleting rows or columns SHIFTS every index after it, and
@@ -313,21 +335,48 @@ async function formatTable(client: GwsClient, args: Record<string, unknown>) {
           'such as "Sheet1!A1:E60". An open-ended range has no end to trim from.'
       );
     }
-    requests.push({
-      deleteDimension: {
-        range: { sheetId, dimension: "COLUMNS", startIndex: grid.endColumnIndex },
-      },
-    });
-    requests.push({
-      deleteDimension: {
-        range: { sheetId, dimension: "ROWS", startIndex: grid.endRowIndex },
-      },
-    });
+    if (!size) {
+      throw new Error(
+        `sheets_format_table cannot trim "${args.range}": the spreadsheet did ` +
+          "not report this tab's grid size, so there is no way to know what " +
+          "lies outside the range."
+      );
+    }
+    // Only delete what actually extends past the range. A deleteDimension
+    // starting at the grid's edge is an API error, and the batch is atomic, so
+    // a trim with nothing to trim would take the whole formatting pass down.
+    if (grid.endColumnIndex < size.columnCount) {
+      requests.push({
+        deleteDimension: {
+          range: {
+            sheetId,
+            dimension: "COLUMNS",
+            startIndex: grid.endColumnIndex,
+            endIndex: size.columnCount,
+          },
+        },
+      });
+    }
+    if (grid.endRowIndex < size.rowCount) {
+      requests.push({
+        deleteDimension: {
+          range: {
+            sheetId,
+            dimension: "ROWS",
+            startIndex: grid.endRowIndex,
+            endIndex: size.rowCount,
+          },
+        },
+      });
+    }
   }
 
   // Column widths. The single highest-value change: the API default is 100px,
-  // which is where the truncation everyone complains about comes from.
-  const lastCol = grid.endColumnIndex;
+  // which is where the truncation everyone complains about comes from. An
+  // open-ended range ("Report", "A:D") is bounded by the grid's real column
+  // count, read in the same single fetch as the tab list, so a bare tab name
+  // does not silently skip the one change this tool exists for.
+  const lastCol = grid.endColumnIndex ?? size?.columnCount;
   const namedEnd = Math.min(firstCol + widths.length, lastCol ?? Infinity);
   widths.forEach((pixelSize, offset) => {
     const startIndex = firstCol + offset;

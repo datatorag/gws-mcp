@@ -102,6 +102,13 @@ interface A1Token {
 function parseToken(token: string, range: string): A1Token {
   const m = A1_TOKEN.exec(token);
   if (!m || (!m[1] && !m[2])) throw badRange(range);
+  if (m[2] && Number(m[2]) === 0) {
+    // Row 0 does not exist. Letting it through makes startRowIndex -1, which
+    // the API either rejects opaquely or clamps to something nobody asked for.
+    throw new Error(
+      `The range "${range}" names row 0. Spreadsheet rows start at 1.`
+    );
+  }
   return {
     ...(m[1] ? { col: columnLetterToIndex(m[1]) } : {}),
     ...(m[2] ? { row: Number(m[2]) } : {}),
@@ -164,7 +171,12 @@ export function splitRange(range: string): { tab?: string; cells: string } {
   if (bare.startsWith("'") && bare.endsWith("'") && bare.length > 1) {
     return { tab: bare.slice(1, -1).replace(/''/g, "'"), cells: "" };
   }
-  if (bare === "" || A1_CELLS.test(bare)) return { cells: bare };
+  // A colon can only mean a range. "A1:" is a broken range, not a tab called
+  // "A1:", and sending it down the tab path produces a "no sheet named A1:"
+  // error that points the caller at their tab list instead of their typo.
+  if (bare === "" || bare.includes(":") || A1_CELLS.test(bare)) {
+    return { cells: bare };
+  }
   return { tab: bare, cells: "" };
 }
 
@@ -233,15 +245,44 @@ export async function resolveSheetId(
  * defaulting to 0 addresses whichever tab happens to hold that id, or fails in
  * a way indistinguishable from a bad range.
  */
+export interface GridSize {
+  rowCount: number;
+  columnCount: number;
+}
+
+export interface RangeResolver {
+  (range: string): GridRange;
+  /** The real row and column count of a tab, for callers that need to bound an
+   * open-ended range against the grid's actual extent. Undefined when the API
+   * did not report one (a non-grid sheet such as a chart). */
+  gridSize(sheetId: number): GridSize | undefined;
+}
+
+interface TabProps {
+  sheetId?: number;
+  title?: string;
+  gridProperties?: { rowCount?: number; columnCount?: number };
+}
+
 export async function gridRangeResolver(
   client: GwsClient,
   spreadsheetId: unknown
-): Promise<(range: string) => GridRange> {
-  const props = await listTabs(client, spreadsheetId);
+): Promise<RangeResolver> {
+  // Its own fetch rather than listTabs(): this one also wants the grid sizes,
+  // and widening listTabs' field mask would change the request every existing
+  // tool makes. Still exactly one call per tool invocation.
+  const result = await client.api("sheets", "spreadsheets", "get", {
+    params: {
+      spreadsheetId,
+      fields: "sheets.properties(sheetId,title,gridProperties(rowCount,columnCount))",
+    },
+  });
+  const data = result.data as { sheets?: { properties?: TabProps }[] };
+  const props: TabProps[] = (data.sheets ?? []).map((sheet) => sheet.properties ?? {});
   const titles = tabTitles(props);
   const firstSheetId = props[0]?.sheetId;
 
-  return (range: string): GridRange => {
+  const resolve = (range: string): GridRange => {
     const { tab, cells } = splitRange(range);
     let sheetId: number | undefined;
     if (tab === undefined) {
@@ -258,6 +299,14 @@ export async function gridRangeResolver(
     }
     return { sheetId, ...a1ToGridBounds(cells) };
   };
+
+  const gridSize = (sheetId: number): GridSize | undefined => {
+    const g = props.find((p) => p.sheetId === sheetId)?.gridProperties;
+    if (g?.rowCount === undefined || g?.columnCount === undefined) return undefined;
+    return { rowCount: g.rowCount, columnCount: g.columnCount };
+  };
+
+  return Object.assign(resolve, { gridSize });
 }
 
 /* ------------------------------ formatting -------------------------------- */
@@ -296,12 +345,19 @@ export function hexToRgbColor(hex: string): {
  * built, never written as a constant, and it has to descend into nested
  * objects rather than stopping at the top level.
  */
+/** Objects always sent whole, so the mask names them whole. Naming a colour's
+ * channels individually is a mask form no measured recipe has used, and the
+ * whole-value form is the one known to work. Kept deliberately short: every
+ * other nested object still gets the leaf-by-leaf mask that stops an
+ * unmentioned property from being cleared. */
+const WHOLE_VALUE_KEYS = new Set(["backgroundColor", "foregroundColor", "padding"]);
+
 export function fieldsMask(obj: Record<string, unknown>): string {
   return Object.entries(obj)
     .map(([key, value]) => {
       const isPlainObject =
         typeof value === "object" && value !== null && !Array.isArray(value);
-      if (!isPlainObject) return key;
+      if (!isPlainObject || WHOLE_VALUE_KEYS.has(key)) return key;
       const inner = fieldsMask(value as Record<string, unknown>);
       return inner ? `${key}(${inner})` : key;
     })
