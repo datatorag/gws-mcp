@@ -338,12 +338,13 @@ export class GwsClient {
   async helper(
     service: string,
     command: string,
-    flags: Record<string, string>,
+    flags: Record<string, string | boolean>,
     opts?: { positional?: string[]; timeout?: number }
   ): Promise<GwsResult> {
     const args = [service, `+${command}`, ...(opts?.positional ?? [])];
     for (const [key, value] of Object.entries(flags)) {
-      if (value) args.push(`--${key}`, value);
+      if (value === true) args.push(`--${key}`);
+      else if (value) args.push(`--${key}`, value);
     }
     return this.exec(args, { timeout: opts?.timeout });
   }

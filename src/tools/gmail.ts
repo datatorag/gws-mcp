@@ -13,7 +13,16 @@ const emailFields = {
     description: "Recipient email address(es), comma-separated",
   },
   subject: { type: "string", description: "Email subject line" },
-  body: { type: "string", description: "Email body text" },
+  body: {
+    type: "string",
+    description:
+      "Plain-text email body. When html_body is also given, this becomes the text/plain alternative part shown by plain-text clients.",
+  },
+  html_body: {
+    type: "string",
+    description:
+      "HTML email body. The message is sent as multipart/alternative with a text/plain fallback part (body if provided, otherwise text derived from the HTML), so plain-text clients still render something readable.",
+  },
   cc: {
     type: "string",
     description: "CC recipients, comma-separated",
@@ -28,11 +37,11 @@ export const gmailTools: ToolDef[] = [
   {
     name: "gmail_send",
     description:
-      "Send a new email via Gmail. Composes and sends an email message to the specified recipients.",
+      "Send a new email via Gmail. Composes and sends an email message to the specified recipients. Accepts a plain-text body, an HTML html_body, or both — HTML is sent as multipart/alternative with a plain-text fallback.",
     inputSchema: {
       type: "object",
       properties: emailFields,
-      required: ["to", "subject", "body"],
+      required: ["to", "subject"],
     },
     annotations: MUTATE("Send email"),
   },
@@ -46,9 +55,14 @@ export const gmailTools: ToolDef[] = [
           type: "string",
           description: "The Gmail message ID to reply to",
         },
-        body: { type: "string", description: "Reply body text" },
+        body: { type: "string", description: "Reply body text (plain)" },
+        html_body: {
+          type: "string",
+          description:
+            "HTML reply body. Sent as text/html with no plain-text alternative part (this path hands quoting and threading to a single-part composer); the original message is quoted with Gmail styling. Provide body or html_body, not both.",
+        },
       },
-      required: ["message_id", "body"],
+      required: ["message_id"],
     },
     annotations: MUTATE("Reply to email"),
   },
@@ -65,6 +79,16 @@ export const gmailTools: ToolDef[] = [
         to: {
           type: "string",
           description: "Recipient email address to forward to",
+        },
+        body: {
+          type: "string",
+          description:
+            "Optional plain-text note included above the forwarded message",
+        },
+        html_body: {
+          type: "string",
+          description:
+            "Optional HTML note included above the forwarded message. Sent as text/html with no plain-text alternative part; the forwarded block is formatted with Gmail styling. Provide body or html_body, not both.",
         },
       },
       required: ["message_id", "to"],
@@ -142,11 +166,11 @@ export const gmailTools: ToolDef[] = [
   {
     name: "gmail_create_draft",
     description:
-      "Create a draft email in Gmail without sending it. The draft can be reviewed and sent later from Gmail. Returns the draft ID and a link to open it in Gmail.",
+      "Create a draft email in Gmail without sending it. The draft can be reviewed and sent later from Gmail. Returns the draft ID and a link to open it in Gmail. Accepts a plain-text body, an HTML html_body, or both — HTML is stored as multipart/alternative with a plain-text fallback.",
     inputSchema: {
       type: "object",
       properties: emailFields,
-      required: ["to", "subject", "body"],
+      required: ["to", "subject"],
     },
     annotations: CREATE("Create email draft"),
   },
@@ -168,7 +192,7 @@ export const gmailTools: ToolDef[] = [
             "Thread ID to preserve threading. If omitted, the existing draft's thread is preserved automatically.",
         },
       },
-      required: ["draft_id", "to", "subject", "body"],
+      required: ["draft_id", "to", "subject"],
     },
     annotations: MUTATE("Update email draft"),
   },
@@ -486,17 +510,86 @@ function listAttachments(
   return out;
 }
 
-function buildRawMessage(args: Record<string, unknown>): string {
+/** The body pair a compose tool was given, checked once so gmail_send and the
+ * raw-MIME builder state the same contract. */
+function resolveBody(
+  toolName: string,
+  args: Record<string, unknown>
+): { body?: string; html?: string } {
+  const body = args.body as string | undefined;
+  const html = args.html_body as string | undefined;
+  if (body === undefined && html === undefined) {
+    throw new Error(
+      `${toolName}: provide body (plain text), html_body (HTML), or both.`
+    );
+  }
+  return { body, html };
+}
+
+/** Flags for the CLI helpers with one body slot (+reply, +forward): either
+ * --body <plain>, or --body <html> --html. Both at once is refused rather
+ * than one silently dropped — a message sent with half its content missing
+ * would be this ticket's silent failure wearing a new hat. */
+function htmlOrPlainBody(
+  toolName: string,
+  args: Record<string, unknown>
+): Record<string, string | boolean> {
+  const body = args.body as string | undefined;
+  const html = args.html_body as string | undefined;
+  if (body !== undefined && html !== undefined) {
+    throw new Error(
+      `${toolName}: provide body or html_body, not both. This path has a ` +
+        "single body slot; a separate plain-text fallback is only supported " +
+        "on gmail_send and the draft tools."
+    );
+  }
+  if (html !== undefined) return { body: html, html: true };
+  return body !== undefined ? { body } : {};
+}
+
+function buildRawMessage(
+  toolName: string,
+  args: Record<string, unknown>
+): string {
+  const { body, html } = resolveBody(toolName, args);
   const headers = [
     `To: ${args.to as string}`,
     `Subject: ${args.subject as string}`,
   ];
   if (args.cc) headers.push(`Cc: ${args.cc as string}`);
   if (args.bcc) headers.push(`Bcc: ${args.bcc as string}`);
-  headers.push("Content-Type: text/plain; charset=utf-8");
-  return Buffer.from(
-    `${headers.join("\r\n")}\r\n\r\n${args.body as string}`
-  ).toString("base64url");
+  headers.push("MIME-Version: 1.0");
+
+  let content: string;
+  if (html === undefined) {
+    headers.push("Content-Type: text/plain; charset=utf-8");
+    content = body as string;
+  } else {
+    // multipart/alternative with the plain part FIRST: clients prefer the
+    // last part they can render, so text/html must come after the fallback.
+    // The fallback is the caller's plain text when given, otherwise text
+    // derived from the HTML — never the raw markup, which is the exact
+    // failure this parameter exists to end.
+    const boundary = `=_gws_${randomUUID()}`;
+    headers.push(
+      `Content-Type: multipart/alternative; boundary="${boundary}"`
+    );
+    content = [
+      `--${boundary}`,
+      "Content-Type: text/plain; charset=utf-8",
+      "",
+      body ?? stripHtml(html),
+      `--${boundary}`,
+      "Content-Type: text/html; charset=utf-8",
+      "",
+      html,
+      `--${boundary}--`,
+      "",
+    ].join("\r\n");
+  }
+  return Buffer.from(`${headers.join("\r\n")}\r\n\r\n${content}`).toString(
+    "base64url"
+  );
 }
 
 function draftResponse(data: unknown) {
@@ -597,6 +690,17 @@ export async function handleGmail(
 ) {
   switch (toolName) {
     case "gmail_send": {
+      const { html } = resolveBody(toolName, args);
+      if (html !== undefined) {
+        // The CLI's +send --html emits a single text/html part with no
+        // fallback; the raw API path sends multipart/alternative instead,
+        // the same shape as the draft tools.
+        const result = await client.api("gmail", "users.messages", "send", {
+          params: { userId: "me" },
+          jsonBody: { raw: buildRawMessage(toolName, args) },
+        });
+        return jsonResponse(result.data);
+      }
       const flags: Record<string, string> = {
         to: args.to as string,
         subject: args.subject as string,
@@ -609,9 +713,15 @@ export async function handleGmail(
     }
 
     case "gmail_reply": {
+      const bodyFlags = htmlOrPlainBody(toolName, args);
+      if (!("body" in bodyFlags)) {
+        throw new Error(
+          `${toolName}: provide body (plain text) or html_body (HTML).`
+        );
+      }
       const result = await client.helper("gmail", "reply", {
         "message-id": args.message_id as string,
-        body: args.body as string,
+        ...bodyFlags,
       });
       return jsonResponse(result.data);
     }
@@ -620,6 +730,7 @@ export async function handleGmail(
       const result = await client.helper("gmail", "forward", {
         "message-id": args.message_id as string,
         to: args.to as string,
+        ...htmlOrPlainBody(toolName, args),
       });
       return jsonResponse(result.data);
     }
@@ -708,7 +819,7 @@ export async function handleGmail(
     }
 
     case "gmail_create_draft": {
-      const raw = buildRawMessage(args);
+      const raw = buildRawMessage(toolName, args);
       const result = await client.api("gmail", "users.drafts", "create", {
         params: { userId: "me" },
         jsonBody: { message: { raw } },
@@ -728,7 +839,7 @@ export async function handleGmail(
         threadId = existingData?.message?.threadId;
       }
 
-      const raw = buildRawMessage(args);
+      const raw = buildRawMessage(toolName, args);
       const message: Record<string, unknown> = { raw };
       if (threadId) message.threadId = threadId;
 
