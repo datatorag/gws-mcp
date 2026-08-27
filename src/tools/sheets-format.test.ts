@@ -459,3 +459,46 @@ describe("enum values nested inside formats", () => {
     );
   });
 });
+
+describe("wrap strategy maps to the Sheets API enum", () => {
+  // The bug this guards: "OVERFLOW" passed this module's own validation and
+  // was then forwarded verbatim, but the API enum is OVERFLOW_CELL, so the
+  // one value most callers reach for could never work. CLIP and WRAP only
+  // worked because they happen to match the API's spelling.
+  it("sends OVERFLOW_CELL when the caller asks for OVERFLOW", async () => {
+    const { client, calls } = fakeClient([tabs, { data: { replies: [{}] } }]);
+    await handleSheetsFormat(client, "sheets_format_range", {
+      spreadsheet_id: "sheet-1",
+      formats: [{ ranges: ["Report!A1:C1"], wrap: "OVERFLOW" }],
+    });
+    const fmt = requestsOf(calls)[0].repeatCell.cell.userEnteredFormat;
+    expect(fmt.wrapStrategy).toBe("OVERFLOW_CELL");
+  });
+
+  it("passes CLIP and WRAP through unchanged", async () => {
+    for (const value of ["CLIP", "WRAP"]) {
+      const { client, calls } = fakeClient([tabs, { data: { replies: [{}] } }]);
+      await handleSheetsFormat(client, "sheets_format_range", {
+        spreadsheet_id: "sheet-1",
+        formats: [{ ranges: ["Report!A1:C1"], wrap: value }],
+      });
+      const fmt = requestsOf(calls)[0].repeatCell.cell.userEnteredFormat;
+      expect(fmt.wrapStrategy).toBe(value);
+    }
+  });
+
+  it("never forwards a wrap value the API does not define", async () => {
+    // Guards the whole class rather than the one value: every accepted name
+    // must land on a real WrapStrategy member.
+    const API_VALUES = new Set(["OVERFLOW_CELL", "LEGACY_WRAP", "CLIP", "WRAP"]);
+    for (const value of ["OVERFLOW", "CLIP", "WRAP"]) {
+      const { client, calls } = fakeClient([tabs, { data: { replies: [{}] } }]);
+      await handleSheetsFormat(client, "sheets_format_range", {
+        spreadsheet_id: "sheet-1",
+        formats: [{ ranges: ["Report!A1:C1"], wrap: value }],
+      });
+      const fmt = requestsOf(calls)[0].repeatCell.cell.userEnteredFormat;
+      expect(API_VALUES.has(fmt.wrapStrategy)).toBe(true);
+    }
+  });
+});

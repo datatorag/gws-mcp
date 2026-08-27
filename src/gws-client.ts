@@ -188,6 +188,43 @@ export interface GwsClientOptions {
   accessToken?: string;
 }
 
+/** The most informative thing we can say about a failed gws invocation.
+ *
+ * Order matters. stderr is the CLI's own diagnostic. stdout is where the API's
+ * error body lands when the call reached Google and was rejected there, which
+ * is the case a caller most needs to see: it names the field and the reason.
+ *
+ * The last resort is deliberately NOT `error.message`. Node sets that to
+ * "Command failed: <the entire command line>", and for these calls the command
+ * line contains the whole serialised batchUpdate request. Echoing it produced
+ * pages of JSON that named neither the failing field nor the reason, which is
+ * strictly worse than saying nothing: it looks like a diagnostic, so it stops
+ * you looking for one. A batchUpdate is atomic, so one bad request fails the
+ * whole pass and the caller has no way to tell which. */
+function errorDetail(error: {
+  code?: number | string;
+  stdout?: string;
+  stderr?: string;
+  message?: string;
+}): string {
+  const stderr = error.stderr?.trim();
+  if (stderr) return stderr;
+
+  const stdout = error.stdout?.trim();
+  if (stdout) {
+    try {
+      const parsed = JSON.parse(stdout) as { error?: { message?: string } };
+      const apiMessage = parsed?.error?.message;
+      if (apiMessage) return apiMessage;
+      return JSON.stringify(parsed);
+    } catch {
+      return stdout;
+    }
+  }
+
+  return `gws exited with code ${error.code ?? "unknown"} and produced no diagnostic output`;
+}
+
 export class GwsClient {
   private mergedEnv: NodeJS.ProcessEnv;
   private defaultAccessToken?: string;
@@ -311,12 +348,10 @@ export class GwsClient {
         );
       }
       if (error.code === 3) {
-        throw new Error(`Validation error: ${error.stderr || error.message}`);
+        throw new Error(`Validation error: ${errorDetail(error)}`);
       }
       if (error.code === 4) {
-        throw new Error(
-          `API discovery error: ${error.stderr || error.message}`
-        );
+        throw new Error(`API discovery error: ${errorDetail(error)}`);
       }
 
       if (error.stdout) {

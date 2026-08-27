@@ -25,6 +25,25 @@ import {
  */
 
 const WRAP_STRATEGIES = ["OVERFLOW", "CLIP", "WRAP"] as const;
+
+/** Caller-facing wrap names to the Sheets API's WrapStrategy enum.
+ *
+ * "OVERFLOW" is the name worth exposing: it is what the Sheets UI calls the
+ * behaviour, and it is what a caller reaches for. The API spells it
+ * OVERFLOW_CELL. Before this map the accepted value was forwarded verbatim,
+ * so `wrap: "OVERFLOW"` passed this file's own validation and was then
+ * rejected by Google. Two of the three documented values worked purely
+ * because they happen to match the API's spelling.
+ *
+ * The general trap: a hand-maintained enum that is validated locally and
+ * forwarded unchanged is two sources of truth pretending to be one, and the
+ * local one is the one that lies. Anything added to WRAP_STRATEGIES needs an
+ * entry here, and the test asserts the two stay in step. */
+const WRAP_STRATEGY_API: Record<string, string> = {
+  OVERFLOW: "OVERFLOW_CELL",
+  CLIP: "CLIP",
+  WRAP: "WRAP",
+};
 const HORIZONTAL = ["LEFT", "CENTER", "RIGHT"] as const;
 const VERTICAL = ["TOP", "MIDDLE", "BOTTOM"] as const;
 
@@ -183,7 +202,9 @@ function cellFormatFrom(spec: Record<string, unknown>, index: number): CellForma
   if (typeof spec.vertical_align === "string") {
     format.verticalAlignment = spec.vertical_align;
   }
-  if (typeof spec.wrap === "string") format.wrapStrategy = spec.wrap;
+  if (typeof spec.wrap === "string") {
+    format.wrapStrategy = WRAP_STRATEGY_API[spec.wrap] ?? spec.wrap;
+  }
   if (typeof spec.number_format === "string") {
     format.numberFormat = numberFormatFrom(spec.number_format);
   }
