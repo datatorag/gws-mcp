@@ -15,11 +15,11 @@ This server powers the Google Workspace connector of [DataToRAG](https://datator
 | **Sheets** | 13 | read, update, append, create, delete, add tab, rename tab, delete tab, clear, find rows, format range, format table, batch update |
 | **Docs** | 5 | get, write, batch update, create, delete |
 | **Slides** | 4 | get, create, batch update, delete |
-| **Tasks** | 6 | list task lists, list tasks, create, update, complete, delete |
+| **Tasks** | 7 | list task lists, create task list, list tasks, create, update, complete, delete |
 | **Generic** | 1 | `gws_run` — fallback for any GWS API not covered above |
 | **Auth** | 1 | OAuth login and status |
 
-**64 tools total.** All tools support shared (team) Drives.
+**65 tools total.** All tools support shared (team) Drives.
 
 ### Key tool details
 
