@@ -13,6 +13,22 @@ export const tasksTools: ToolDef[] = [
     annotations: READ("List task lists"),
   },
   {
+    name: "tasks_create_tasklist",
+    description:
+      "Create a new task list. A task list is the container tasks live in — use this when a workflow needs its own list rather than adding to '@default'.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        title: {
+          type: "string",
+          description: "Title of the new task list, as it appears in the Tasks UI",
+        },
+      },
+      required: ["title"],
+    },
+    annotations: CREATE("Create task list"),
+  },
+  {
     name: "tasks_list_tasks",
     description:
       "List tasks in a specific task list. Returns task titles, statuses, due dates, and notes.",
@@ -143,6 +159,25 @@ export async function handleTasks(
   switch (toolName) {
     case "tasks_list": {
       const result = await client.api("tasks", "tasklists", "list", {});
+      return jsonResponse(result.data);
+    }
+
+    case "tasks_create_tasklist": {
+      // The API accepts a blank title and returns 200 with an untitled list,
+      // which is the worst outcome available: the caller reads success, and
+      // the user gets a list they cannot name or find in the Tasks UI. Verified
+      // against the live API — both "" and "   " were created, not rejected.
+      // The schema already requires the parameter; only its emptiness is left.
+      const title = (args.title as string).trim();
+      if (!title) {
+        throw new Error(
+          "tasks_create_tasklist: title must not be blank. The Tasks API accepts a " +
+            "blank title and creates an unnamed list rather than reporting an error."
+        );
+      }
+      const result = await client.api("tasks", "tasklists", "insert", {
+        jsonBody: { title },
+      });
       return jsonResponse(result.data);
     }
 
