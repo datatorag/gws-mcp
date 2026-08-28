@@ -203,6 +203,53 @@ Full suite after restoring: **13 files, 237 tests, all passing** (was 216).
 
 ---
 
+## A check that could not fail, and reported a pass
+
+The same lesson landed on my own tooling an hour later, and it is recorded here
+rather than in a footnote because this is the third instance of the class seen
+across three sessions in one day.
+
+The pre-push secret scan ran as:
+
+```sh
+FILES="a.md b.sh c.ts …"
+grep -nEi "…" $FILES || echo "  none"
+```
+
+Under `zsh` an unquoted variable is **not** word-split. `$FILES` expanded to a
+single filename containing spaces, no such file existed, and every pattern
+reported `none`. The scan announced a clean result for real addresses, internal
+identifiers, HQ paths and credentials, having examined nothing. It failed open
+and looked identical to a pass.
+
+The tell was available and I nearly walked past it: a one-line `warning: … No
+such file or directory` above output that otherwise read as success.
+
+The rule, stated so it survives the specific bug: **a scanner needs a positive
+control in the same run — a pattern known to be present, whose absence proves
+the harness itself is broken.** A grep that finds nothing and a grep that
+searched nothing produce the same text. The rerun used a `zsh` array, asserted
+each file exists, and grepped for a term guaranteed to appear before trusting
+any negative:
+
+```sh
+FILES=(a.md b.sh c.ts …)
+for f in $FILES; do [ -f "$f" ] || echo "MISSING: $f"; done
+grep -nEi "tasklist" "${FILES[@]}" | head -2      # positive control
+```
+
+That run found the real answers: the only addresses in the diff are
+`example.com`, the domain and secret-shaped hits are all pre-existing lines in
+files this change only edits a count in, and the three lines this diff adds to
+`README.md` and `CLAUDE.md` are tool counts.
+
+This is the same failure the mutation pass above exists to prevent, one level
+out: the mutations checked whether the *tests* could fail, and nothing was
+checking whether the *scanner* could. Shell word-splitting is the accident;
+"a verification that cannot produce a red is not a verification" is the finding.
+
+---
+
 ## Task 3(b) — our own call site
 
 Three paths, and they are not alike.
