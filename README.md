@@ -11,7 +11,7 @@ This server powers the Google Workspace connector of [DataToRAG](https://datator
 | **Gmail** | 18 | send, reply, forward, read, search, list, create draft, update draft, send draft, delete draft, mark read, list filters, create label, list labels, update label, delete label, label message, save attachment to Drive |
 | **Calendar** | 6 | list events, get event, create, update, delete, freebusy |
 | **Contacts** | 7 | search, get, list, create, update, delete, directory search |
-| **Drive** | 3 | search, read file, create folder |
+| **Drive** | 5 | search, read file, create folder, rename, copy |
 | **Sheets** | 13 | read, update, append, create, delete, add tab, rename tab, delete tab, clear, find rows, format range, format table, batch update |
 | **Docs** | 5 | get, write, batch update, create, delete |
 | **Slides** | 4 | get, create, batch update, delete |
@@ -19,7 +19,7 @@ This server powers the Google Workspace connector of [DataToRAG](https://datator
 | **Generic** | 1 | `gws_run` — fallback for any GWS API not covered above |
 | **Auth** | 1 | OAuth login and status |
 
-**65 tools total.** All tools support shared (team) Drives.
+**67 tools total.** All tools support shared (team) Drives.
 
 ### Key tool details
 
@@ -53,6 +53,10 @@ immutable, so when they return, "editing" one means create new + delete old.
 **drive_search** — Searches across both personal and shared Drives. Supports full [Drive query syntax](https://developers.google.com/drive/api/guides/search-files) including folder parents, mimeType filters, and name matching.
 
 **drive_create_folder** — Creates a folder in Drive, optionally inside a parent folder.
+
+**drive_rename_file** — Renames a file or folder. Sends only `name`, so nothing else about the file changes; a blank or whitespace-only name is rejected rather than written, because Drive accepts an empty name and the file then cannot be found by name.
+
+**drive_copy_file** — Copies a file and names the copy in the same call, optionally into `parent_id`. This is the template path: the copy carries the original's tabs, formatting and formulas, where a hand-rebuild drifts from the template. Folders cannot be copied — Drive returns `403 cannotCopyFile: "This file cannot be copied by the user"`, which reads like a permissions problem and is not one.
 
 **drive_read_file** — Reads the text content of any file in Drive by file ID. Routes by mimeType:
 - Google Docs → plain text extraction
