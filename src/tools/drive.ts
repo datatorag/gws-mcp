@@ -1,5 +1,5 @@
 import { errorMessage, type GwsClient } from "../gws-client.js";
-import { CREATE, READ, ToolDef } from "./annotations.js";
+import { CREATE, MUTATE, READ, ToolDef } from "./annotations.js";
 import { jsonResponse } from "./response.js";
 import { deleteDriveFile } from "./drive-ops.js";
 import { readDocText } from "./docs.js";
@@ -63,6 +63,51 @@ export const driveTools: ToolDef[] = [
     },
     annotations: READ("Read Drive file"),
   },
+  {
+    name: "drive_rename_file",
+    description:
+      "Rename a file or folder in Google Drive. Changes the name only: content, location, and sharing are untouched. Works on any Drive item the account can edit, including Docs, Sheets, Slides, and folders.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        file_id: {
+          type: "string",
+          description: "The Google Drive file or folder ID to rename",
+        },
+        name: {
+          type: "string",
+          description: "The new name",
+        },
+      },
+      required: ["file_id", "name"],
+    },
+    annotations: MUTATE("Rename Drive file"),
+  },
+  {
+    name: "drive_copy_file",
+    description:
+      "Copy a file in Google Drive, naming the copy in the same call. Use this to instantiate a template instead of rebuilding it: the copy carries the original's tabs, formatting, and formulas, so it cannot drift from the template the way a hand-rebuild does. Folders cannot be copied: Drive rejects that with a 403 \"This file cannot be copied by the user\", which is a limitation of the API and not a permissions problem to retry.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        file_id: {
+          type: "string",
+          description: "The Google Drive file ID to copy",
+        },
+        name: {
+          type: "string",
+          description: "Name for the new copy",
+        },
+        parent_id: {
+          type: "string",
+          description:
+            "Folder ID to place the copy in (optional, defaults to the original's folder)",
+        },
+      },
+      required: ["file_id", "name"],
+    },
+    annotations: CREATE("Copy Drive file"),
+  },
 ];
 
 const GOOGLE_DOC = "application/vnd.google-apps.document";
@@ -118,9 +163,59 @@ export async function handleDrive(
       return jsonResponse({ fileId, name, mimeType, content });
     }
 
+    case "drive_rename_file": {
+      const result = await client.api("drive", "files", "update", {
+        params: {
+          fileId: args.file_id as string,
+          supportsAllDrives: true,
+          fields: "id,name,webViewLink",
+        },
+        // files.update is a PATCH: whatever is in this body gets written, so
+        // it carries the one field the caller asked to change and no other.
+        jsonBody: { name: requireName(args.name, toolName) },
+      });
+      return jsonResponse(result.data);
+    }
+
+    case "drive_copy_file": {
+      const body: Record<string, unknown> = { name: requireName(args.name, toolName) };
+      if (args.parent_id) {
+        body.parents = [args.parent_id as string];
+      }
+      const result = await client.api("drive", "files", "copy", {
+        params: {
+          fileId: args.file_id as string,
+          supportsAllDrives: true,
+          // `parents` is in the field list because where the copy landed is
+          // the one thing the caller cannot see without a second call.
+          fields: "id,name,parents,webViewLink",
+        },
+        jsonBody: body,
+      });
+      return jsonResponse(result.data);
+    }
+
     default:
       throw new Error(`Unknown Drive tool: ${toolName}`);
   }
+}
+
+/** Reject a name that is empty or only whitespace.
+ *
+ * The schema check at the server boundary catches a missing `name`; it has no
+ * opinion about `""`. Drive accepts an empty name and stores it, which turns
+ * an approved "rename" into a file the owner can no longer find by name and
+ * cannot undo from here. Blank is rejected rather than defaulted because
+ * there is no name we could pick that the caller would have meant.
+ *
+ * The check is on the trimmed value, but the untrimmed string is what gets
+ * sent: normalising someone's name for them is a second, unasked-for edit. */
+function requireName(value: unknown, toolName: string): string {
+  const name = typeof value === "string" ? value : "";
+  if (name.trim() === "") {
+    throw new Error(`${toolName}: "name" must not be blank.`);
+  }
+  return name;
 }
 
 async function readFileContent(
