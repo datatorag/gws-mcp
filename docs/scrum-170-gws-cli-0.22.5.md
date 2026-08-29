@@ -7,9 +7,16 @@ Versions this report depends on: upstream release `v0.22.5` (published
 2026-03-31), replacing `v0.13.2` (2026-03-12); verification ran 2026-08-28
 on macOS arm64 and, via Docker, Ubuntu 22.04 and 24.04 x86_64.
 
+## Status: HOLD
+
+Not merged, not tagged, not shipped. It cannot move until the new binary
+is proven against a live service, which needs credentials that no longer
+exist on the verifying machine (see Incident). That re-login is a human
+step, not one this branch or an automated session should take.
+
 ## Lead: this is NOT ready to merge as a pure pin bump
 
-Three things HQ has to decide before this ships. None of them is fixed here,
+Four things HQ has to decide before this ships. None of them is fixed here,
 because each is a second change hiding inside the first.
 
 1. **`spawnAuthForUrl` is broken by 0.22.5.** 0.13.2 printed the OAuth URL
@@ -41,6 +48,14 @@ because each is a second change hiding inside the first.
    former, this deploy is a hard outage of every tool. Upstream also
    publishes a `x86_64-unknown-linux-musl` build with no glibc floor;
    switching target is a decision, not a bump.
+4. **`gmail_forward` changes what it sends.** Since 0.20.0 the `+forward`
+   helper attaches the original message's attachments by default, and
+   `gmail.ts` does not pass the new `--no-original-attachments` opt-out.
+   After this bump a user forwarding a mail forwards its attachments too,
+   with no change on our side and no change to the tool's description or
+   confirmation title. That is a user-visible behaviour change and a
+   consent question: keep the new default (matches Gmail web), pin the
+   old one with the flag, or expose it as a parameter. Not decided here.
 
 Everything below is the evidence.
 
