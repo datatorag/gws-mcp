@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-VERSION="0.13.2"
+VERSION="0.17.0"
 BASE_URL="https://github.com/googleworkspace/cli/releases/download/v${VERSION}"
 BIN_DIR="$(cd "$(dirname "$0")/.." && pwd)/bin"
 
