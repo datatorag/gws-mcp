@@ -96,6 +96,23 @@ describe("validateArgs", () => {
     expect(message).toContain("FORMULA");
   });
 
+  it("rejects a string shorter than minLength, naming the length and what arrived", () => {
+    // `required` catches an absent name; only `minLength` catches "", which
+    // Drive would otherwise accept and store as the file's name.
+    const message = failure("drive_rename_file", { file_id: "f", name: "" });
+    expect(message).toContain('"name"');
+    expect(message).toContain("at least 1 character");
+    expect(message).toContain('received a string ("")');
+  });
+
+  it("leaves minLength to the type check when the value is not a string", () => {
+    // A number has no length; the message must be about the type, not the
+    // length, or it describes the wrong problem.
+    const message = failure("drive_rename_file", { file_id: "f", name: 7 });
+    expect(message).toContain("must be a string");
+    expect(message).not.toContain("at least");
+  });
+
   it("reports every unknown parameter at once, not just the first", () => {
     const message = failure("docs_create", { title: "t", colour: "red", size: 3 });
     expect(message).toContain('"colour"');

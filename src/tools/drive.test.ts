@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { CREATE, MUTATE } from "./annotations.js";
 import { driveTools, handleDrive } from "./drive.js";
 import { fakeClient, payload } from "./fake-client.test-helper.js";
+import { validateArgs } from "./validate.js";
 
 /** SCRUM-170: a file created through this server could not be renamed or
  * copied through it. The gws CLI is not a fallback — it is authed as another
@@ -10,18 +11,20 @@ import { fakeClient, payload } from "./fake-client.test-helper.js";
  * because that is the part no unit test can re-verify after a shape change
  * upstream and the part a live smoke test is slowest to bisect. */
 
+const tool = (name: string) => driveTools.find((t) => t.name === name);
+
 const renamed = {
   data: { id: "file-1", name: "Built With directory", webViewLink: "https://drive/f1" },
 };
 
 describe("drive_rename_file", () => {
-  it("renames through files.update, sending the name and nothing else", async () => {
+  it("renames through files.update, sending the name and nothing else, and reads the stored name back", async () => {
     // files.update is a PATCH: every field present in the body is written.
     // Sending anything beyond `name` here would overwrite state the caller
     // never mentioned — the reason this body is asserted key-for-key.
     const { client, calls } = fakeClient([renamed]);
 
-    await handleDrive(client, "drive_rename_file", {
+    const result = await handleDrive(client, "drive_rename_file", {
       file_id: "file-1",
       name: "Built With directory",
     });
@@ -35,32 +38,10 @@ describe("drive_rename_file", () => {
       jsonBody: { name: "Built With directory" },
     });
     expect(Object.keys(calls[0].jsonBody as object)).toEqual(["name"]);
-  });
-
-  it("asks Drive for the stored name back, so the caller sees what landed", async () => {
     // Drive normalises names (it strips nothing today, but it has). Echoing
     // the requested name would report success for a write we never read.
-    const { client, calls } = fakeClient([renamed]);
-
-    const result = await handleDrive(client, "drive_rename_file", {
-      file_id: "file-1",
-      name: "Built With directory",
-    });
-
     expect(String((calls[0].params as { fields: string }).fields)).toContain("name");
     expect(payload(result).name).toBe("Built With directory");
-  });
-
-  it("refuses a blank name instead of erasing the one the file has", async () => {
-    // The schema check at the boundary catches a missing `name`, not an empty
-    // or whitespace one. Drive accepts "" and the file becomes unfindable by
-    // name — a destructive outcome from a tool the user approved as a rename.
-    const { client, calls } = fakeClient([renamed]);
-
-    await expect(
-      handleDrive(client, "drive_rename_file", { file_id: "file-1", name: "   " })
-    ).rejects.toThrow(/blank/i);
-    expect(calls).toHaveLength(0);
   });
 });
 
@@ -74,7 +55,7 @@ const copied = {
 };
 
 describe("drive_copy_file", () => {
-  it("copies through files.copy, naming the copy in one round trip", async () => {
+  it("copies through files.copy, naming the copy in one round trip, with no parents key when none was given", async () => {
     // The template path is copy-then-use. A copy that lands as "Copy of X"
     // and needs a second rename call is the gap this ticket exists to close.
     const { client, calls } = fakeClient([copied]);
@@ -92,18 +73,6 @@ describe("drive_copy_file", () => {
       params: { fileId: "template-1", supportsAllDrives: true },
       jsonBody: { name: "r/saasbuild harvest" },
     });
-  });
-
-  it("omits parents entirely when no parent_id is given", async () => {
-    // `parents: []` and `parents: [undefined]` are not the same request as
-    // no key at all: Drive reads an explicit empty list as "no folder".
-    const { client, calls } = fakeClient([copied]);
-
-    await handleDrive(client, "drive_copy_file", {
-      file_id: "template-1",
-      name: "r/saasbuild harvest",
-    });
-
     expect(calls[0].jsonBody).not.toHaveProperty("parents");
   });
 
@@ -122,38 +91,106 @@ describe("drive_copy_file", () => {
     expect(String((calls[0].params as { fields: string }).fields)).toContain("parents");
     expect(payload(result).parents).toEqual(["folder-9"]);
   });
+});
 
-  it("refuses a blank name rather than creating an unnamed duplicate", async () => {
-    const { client, calls } = fakeClient([copied]);
+/** `parents: []` and `parents: [undefined]` are not the same request as no
+ * key at all: Drive reads an explicit empty list as "no folder". Both tools
+ * that take an optional parent build the body by hand, so both are pinned. */
+describe("optional parent_id", () => {
+  it.each([
+    ["drive_create_folder", { name: "Q4" }],
+    ["drive_copy_file", { file_id: "template-1", name: "Q4" }],
+  ])("%s omits parents entirely when no parent_id is given", async (name, args) => {
+    const { client, calls } = fakeClient([{ data: {} }]);
+    await handleDrive(client, name, args);
+    expect(calls[0].jsonBody).not.toHaveProperty("parents");
+  });
+});
 
-    await expect(
-      handleDrive(client, "drive_copy_file", { file_id: "template-1", name: "" })
-    ).rejects.toThrow(/blank/i);
+/** Drive accepts "" as a name and stores it, which turns an approved rename
+ * into a file the owner can no longer find by name, and a copy into an
+ * unnamed duplicate. `minLength: 1` advertises the rule in the schema the
+ * model reads before calling; the handler's blank check covers the
+ * whitespace-only case the schema cannot express. */
+describe("blank names", () => {
+  it.each([
+    ["drive_rename_file", { file_id: "file-1" }],
+    ["drive_copy_file", { file_id: "template-1" }],
+  ])("%s advertises a non-empty name and rejects an empty one at the boundary", (name, base) => {
+    const t = tool(name);
+    expect(t?.inputSchema.properties.name).toMatchObject({ minLength: 1 });
+    expect(() => validateArgs(t!, { ...base, name: "" })).toThrow(/"name"/);
+  });
+
+  it.each([
+    ["drive_rename_file", { file_id: "file-1", name: "   " }],
+    ["drive_copy_file", { file_id: "template-1", name: "" }],
+  ])("%s refuses a blank name before any call reaches Drive", async (name, args) => {
+    // No planned response: the fake throws its own error if the guard ever
+    // stops short-circuiting, so "calls is empty" cannot pass by accident.
+    const { client, calls } = fakeClient([]);
+    await expect(handleDrive(client, name, args)).rejects.toThrow(/blank/i);
     expect(calls).toHaveLength(0);
   });
 });
 
+/** drive_read_file's Office conversion is the older caller of files.copy and
+ * the one a shared helper endangers: it asks for Drive's default response
+ * (no `fields`) and reads `mimeType` out of it. The request it sends is
+ * pinned key-for-key so the newer caller's field list cannot leak in. */
+describe("drive_read_file Office conversion", () => {
+  it("copy-converts to the native type, reads the copy, and deletes it", async () => {
+    const xlsx = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    const { client, calls } = fakeClient([
+      { data: { name: "Budget.xlsx", mimeType: xlsx } },
+      { data: { id: "tmp-1", mimeType: "application/vnd.google-apps.spreadsheet" } },
+      { data: { values: [["a", "b"]] } },
+      { data: {} },
+    ]);
+
+    const result = await handleDrive(client, "drive_read_file", { file_id: "office-1" });
+
+    // Deletion is fire-and-forget, so give it the tick it needs to be recorded.
+    await new Promise((r) => setImmediate(r));
+
+    expect(calls.map((c) => `${c.resource}.${c.method}`)).toEqual([
+      "files.get",
+      "files.copy",
+      "spreadsheets.values.get",
+      "files.delete",
+    ]);
+    expect(calls[1]).toMatchObject({
+      service: "drive",
+      params: { fileId: "office-1", supportsAllDrives: true },
+      jsonBody: {
+        name: "Budget.xlsx [MCP temp]",
+        mimeType: "application/vnd.google-apps.spreadsheet",
+      },
+    });
+    expect(Object.keys(calls[1].params as object).sort()).toEqual(["fileId", "supportsAllDrives"]);
+    expect(Object.keys(calls[1].jsonBody as object).sort()).toEqual(["mimeType", "name"]);
+    expect(calls[2].params).toMatchObject({ spreadsheetId: "tmp-1" });
+    expect(calls[3].params).toMatchObject({ fileId: "tmp-1" });
+    expect(payload(result)).toMatchObject({
+      fileId: "office-1",
+      name: "Budget.xlsx",
+      mimeType: xlsx,
+      content: [["a", "b"]],
+    });
+  });
+});
+
 describe("registration and consent", () => {
-  it("advertises both tools, since a handler alone is invisible to the model", () => {
+  // A rename overwrites state the user cannot recover from the tool; a copy
+  // adds a file and destroys nothing. Getting these backwards either buries
+  // the copy path in prompts or lets a rename through without one. The title
+  // is pinned too: it is the string the user reads before approving.
+  it.each([
+    ["drive_rename_file", MUTATE("Rename Drive file")],
+    ["drive_copy_file", CREATE("Copy Drive file")],
+  ])("%s is registered and pinned to its exact annotation shape", (name, expected) => {
     // SCRUM-170 names this exact failure mode: the surface is what is
     // registered, not what is implemented.
-    const names = driveTools.map((t) => t.name);
-    expect(names).toContain("drive_rename_file");
-    expect(names).toContain("drive_copy_file");
-  });
-
-  it("prompts for rename as destructive and copy as merely additive", () => {
-    // A rename overwrites state the user cannot recover from the tool; a copy
-    // adds a file and destroys nothing. Getting these backwards either buries
-    // the copy path in prompts or lets a rename through without one.
-    const byName = new Map(driveTools.map((t) => [t.name, t]));
-    expect(byName.get("drive_rename_file")?.annotations).toMatchObject({
-      readOnlyHint: MUTATE("x").readOnlyHint,
-      destructiveHint: MUTATE("x").destructiveHint,
-    });
-    expect(byName.get("drive_copy_file")?.annotations).toMatchObject({
-      readOnlyHint: CREATE("x").readOnlyHint,
-      destructiveHint: CREATE("x").destructiveHint,
-    });
+    expect(tool(name)?.annotations).toEqual(expected);
   });
 });

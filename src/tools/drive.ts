@@ -1,7 +1,8 @@
 import { errorMessage, type GwsClient } from "../gws-client.js";
 import { CREATE, MUTATE, READ, ToolDef } from "./annotations.js";
 import { jsonResponse } from "./response.js";
-import { deleteDriveFile } from "./drive-ops.js";
+import { requireNonBlank } from "./validate.js";
+import { copyDriveFile, deleteDriveFile } from "./drive-ops.js";
 import { readDocText } from "./docs.js";
 import { readSheetValues } from "./sheets.js";
 import { getPresentationOutline } from "./slides.js";
@@ -76,6 +77,7 @@ export const driveTools: ToolDef[] = [
         },
         name: {
           type: "string",
+          minLength: 1,
           description: "The new name",
         },
       },
@@ -96,6 +98,7 @@ export const driveTools: ToolDef[] = [
         },
         name: {
           type: "string",
+          minLength: 1,
           description: "Name for the new copy",
         },
         parent_id: {
@@ -172,50 +175,32 @@ export async function handleDrive(
         },
         // files.update is a PATCH: whatever is in this body gets written, so
         // it carries the one field the caller asked to change and no other.
-        jsonBody: { name: requireName(args.name, toolName) },
+        jsonBody: { name: requireNonBlank(toolName, "name", args.name as string) },
       });
       return jsonResponse(result.data);
     }
 
     case "drive_copy_file": {
-      const body: Record<string, unknown> = { name: requireName(args.name, toolName) };
+      const body: Record<string, unknown> = {
+        name: requireNonBlank(toolName, "name", args.name as string),
+      };
       if (args.parent_id) {
         body.parents = [args.parent_id as string];
       }
-      const result = await client.api("drive", "files", "copy", {
-        params: {
-          fileId: args.file_id as string,
-          supportsAllDrives: true,
-          // `parents` is in the field list because where the copy landed is
-          // the one thing the caller cannot see without a second call.
-          fields: "id,name,parents,webViewLink",
-        },
-        jsonBody: body,
-      });
+      // `parents` is in the field list because where the copy landed is the
+      // one thing the caller cannot see without a second call.
+      const result = await copyDriveFile(
+        client,
+        args.file_id as string,
+        body,
+        "id,name,parents,webViewLink"
+      );
       return jsonResponse(result.data);
     }
 
     default:
       throw new Error(`Unknown Drive tool: ${toolName}`);
   }
-}
-
-/** Reject a name that is empty or only whitespace.
- *
- * The schema check at the server boundary catches a missing `name`; it has no
- * opinion about `""`. Drive accepts an empty name and stores it, which turns
- * an approved "rename" into a file the owner can no longer find by name and
- * cannot undo from here. Blank is rejected rather than defaulted because
- * there is no name we could pick that the caller would have meant.
- *
- * The check is on the trimmed value, but the untrimmed string is what gets
- * sent: normalising someone's name for them is a second, unasked-for edit. */
-function requireName(value: unknown, toolName: string): string {
-  const name = typeof value === "string" ? value : "";
-  if (name.trim() === "") {
-    throw new Error(`${toolName}: "name" must not be blank.`);
-  }
-  return name;
 }
 
 async function readFileContent(
@@ -246,9 +231,9 @@ async function readFileContent(
         : GOOGLE_SLIDES;
     let copy: { id: string; mimeType: string } | undefined;
     try {
-      const copyResult = await client.api("drive", "files", "copy", {
-        params: { fileId, supportsAllDrives: true },
-        jsonBody: { name: `${name} [MCP temp]`, mimeType: target },
+      const copyResult = await copyDriveFile(client, fileId, {
+        name: `${name} [MCP temp]`,
+        mimeType: target,
       });
       copy = copyResult.data as { id: string; mimeType: string };
       return await readFileContent(client, copy.id, name, copy.mimeType);

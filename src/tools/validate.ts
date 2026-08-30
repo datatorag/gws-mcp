@@ -43,7 +43,7 @@ function describe(value: unknown): string {
 export function validateArgs(tool: ToolDef, args: Record<string, unknown>): void {
   const properties = tool.inputSchema.properties as Record<
     string,
-    { type?: string; enum?: unknown[] } | undefined
+    { type?: string; enum?: unknown[]; minLength?: number } | undefined
   >;
   const known = Object.keys(properties);
 
@@ -99,5 +99,33 @@ export function validateArgs(tool: ToolDef, args: Record<string, unknown>): void
           `${spec.enum.map((v) => `"${String(v)}"`).join(", ")}, received ${describe(value)}.`
       );
     }
+
+    // `minLength` is the one way a schema can say "required, and not empty".
+    // Only checked on strings: the type check above has already rejected
+    // anything else, and a `minLength` on a non-string property is a schema
+    // mistake this file has no business guessing about.
+    if (spec.minLength !== undefined && typeof value === "string" && value.length < spec.minLength) {
+      throw new Error(
+        `${tool.name}: parameter "${key}" must be at least ${spec.minLength} ` +
+          `${spec.minLength === 1 ? "character" : "characters"}, received ${describe(value)}.`
+      );
+    }
   }
+}
+
+/**
+ * Reject a string that is empty or only whitespace, for a handler whose API
+ * would accept it and store it. `minLength: 1` in the schema advertises the
+ * rule to the caller and catches `""` at the boundary; it cannot express
+ * "not just spaces", so that half lives here, exported so every handler with
+ * the same need uses the same check and the same message.
+ *
+ * Returns the value untrimmed: normalising someone's name for them is a
+ * second, unasked-for edit.
+ */
+export function requireNonBlank(toolName: string, key: string, value: string): string {
+  if (value.trim() === "") {
+    throw new Error(`${toolName}: "${key}" must not be blank.`);
+  }
+  return value;
 }
