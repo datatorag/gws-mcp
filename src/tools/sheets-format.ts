@@ -75,7 +75,7 @@ export const sheetsFormatTools: ToolDef[] = [
           type: "array",
           items: { type: "object" },
           description:
-            'One or more formatting instructions, each applied to one or more ranges. Every field except "ranges" is optional and only the ones you set are changed. Fields: ranges (array of A1 strings, required, e.g. ["Sheet1!A1:D1", "Sheet1!A20:D20"]), bold (boolean), italic (boolean), strikethrough (boolean), font_family (string, e.g. "Inter"), font_size (number), text_color ("#RRGGBB"), background_color ("#RRGGBB"), horizontal_align (LEFT|CENTER|RIGHT), vertical_align (TOP|MIDDLE|BOTTOM), wrap (OVERFLOW|CLIP|WRAP), number_format (a pattern string such as "#,##0.00", "yyyy-mm-dd" or "0.0%"), padding ({top,right,bottom,left} in pixels), merge (boolean, merges each named range into a single cell). Example: [{"ranges":["Sheet1!A1:D1"],"bold":true,"background_color":"#F1F1F1"},{"ranges":["Sheet1!A2:D99"],"wrap":"WRAP"}]',
+            'One or more formatting instructions, each applied to one or more ranges. Every field except "ranges" is optional and only the ones you set are changed. Fields: ranges (array of A1 strings, required, e.g. ["TabName!A1:D1", "TabName!A20:D20"]), bold (boolean), italic (boolean), strikethrough (boolean), font_family (string, e.g. "Inter"), font_size (number), text_color ("#RRGGBB"), background_color ("#RRGGBB"), horizontal_align (LEFT|CENTER|RIGHT), vertical_align (TOP|MIDDLE|BOTTOM), wrap (OVERFLOW|CLIP|WRAP), number_format (a pattern string such as "#,##0.00", "yyyy-mm-dd" or "0.0%"), padding ({top,right,bottom,left} in pixels), merge (boolean, merges each named range into a single cell). Example: [{"ranges":["TabName!A1:D1"],"bold":true,"background_color":"#F1F1F1"},{"ranges":["TabName!A2:D99"],"wrap":"WRAP"}]',
         },
       },
       required: ["spreadsheet_id", "formats"],
@@ -93,7 +93,7 @@ export const sheetsFormatTools: ToolDef[] = [
         range: {
           type: "string",
           description:
-            'The table, in A1 notation, e.g. "Sheet1!A1:E60", or a bare tab name for the whole tab. Include the header row.',
+            'The table: a bare tab name for the whole tab, or A1 notation like "TabName!A1:E60" naming a tab the spreadsheet actually has. Include the header row.',
         },
         header_rows: {
           type: "number",

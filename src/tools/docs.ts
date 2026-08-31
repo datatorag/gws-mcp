@@ -7,7 +7,7 @@ export const docsTools: ToolDef[] = [
   {
     name: "docs_get",
     description:
-      'Get the content of a Google Doc. Three modes: "text" (default) returns plain text — use for reading/summarizing. "index" returns text with startIndex/endIndex — use before positional edits (insertText at index, deleteContentRange). "full" returns the raw API response — use only for debugging or style operations.',
+      'Get the content of a Google Doc. Three modes: "text" (default) returns plain text — use for reading/summarizing. "index" returns text with startIndex/endIndex — use before positional edits (insertText at index, deleteContentRange). "full" returns the raw API response — use only for debugging or style operations. To read part of a long document, pass start_index/end_index — the SAME character indices that mode "index" reports and docs_batch_update consumes. A ranged response also reports totalEndIndex, clipped, and nextStartIndex (when more content follows), so a caller can page instead of guessing whether it saw everything. Without a range, behaviour is unchanged and the whole document is returned.',
     inputSchema: {
       type: "object",
       properties: {
@@ -20,6 +20,16 @@ export const docsTools: ToolDef[] = [
           enum: ["text", "index", "full"],
           description:
             '"text" (default): plain text. "index": text with character positions for edits. "full": raw API response.',
+        },
+        start_index: {
+          type: "number",
+          description:
+            'Return content from this character index (inclusive), in the same index space mode "index" reports and docs_batch_update consumes — a document body starts at index 1. Omit to read from the start. Not valid with mode "full".',
+        },
+        end_index: {
+          type: "number",
+          description:
+            "Return content up to this character index (exclusive), same index space as start_index. Omit to read to the end.",
         },
       },
       required: ["document_id"],
@@ -60,7 +70,12 @@ export const docsTools: ToolDef[] = [
         requests: {
           type: "array",
           description:
-            'Array of update request objects. Each can be: insertText ({ insertText: { location: { index: 1 }, text: "Hello" } }), replaceAllText ({ replaceAllText: { containsText: { text: "old", matchCase: true }, replaceText: "new" } }), deleteContentRange ({ deleteContentRange: { range: { startIndex: 1, endIndex: 10 } } })',
+            'Array of Google Docs API request objects, applied in order. Common shapes, with the nesting exactly as the API requires: ' +
+            'insertText { insertText: { location: { index: 1 }, text: "Hello" } }; ' +
+            'replaceAllText { replaceAllText: { containsText: { text: "old", matchCase: true }, replaceText: "new" } } — note matchCase sits INSIDE containsText, never at the top level of replaceAllText; ' +
+            'deleteContentRange { deleteContentRange: { range: { startIndex: 1, endIndex: 10 } } }; ' +
+            'updateTextStyle { updateTextStyle: { range: { startIndex: 1, endIndex: 10 }, textStyle: { bold: true }, fields: "bold" } } — fields is required and names which textStyle properties to apply. ' +
+            'Indices are the character positions docs_get mode "index" reports.',
           items: { type: "object" },
         },
       },
@@ -159,14 +174,66 @@ function docResult(
   return result;
 }
 
-function runsToText(data: Record<string, unknown>): string {
-  return docRuns(data)
-    .map((r) => r.text ?? `[image:${r.inlineObjectId}]`)
-    .join("");
+function textOf(runs: DocRun[]): string {
+  return runs.map((r) => r.text ?? `[image:${r.inlineObjectId}]`).join("");
 }
 
-function extractText(data: Record<string, unknown>): Record<string, unknown> {
-  return docResult(data, { text: runsToText(data) });
+function runsToText(data: Record<string, unknown>): string {
+  return textOf(docRuns(data));
+}
+
+/** Clip runs to [start, end), keeping reported indices ABSOLUTE document
+ * positions — the same ones mode "index" reports unclipped and the same ones
+ * docs_batch_update consumes. A partially overlapped text run is trimmed and
+ * its indices moved with the kept characters, so a caller can take the
+ * numbers straight into a positional edit. */
+function clipRuns(runs: DocRun[], start: number, end: number): DocRun[] {
+  const out: DocRun[] = [];
+  for (const run of runs) {
+    if (run.endIndex <= start || run.startIndex >= end) continue;
+    const from = Math.max(run.startIndex, start);
+    const to = Math.min(run.endIndex, end);
+    out.push(
+      run.text !== undefined
+        ? {
+            startIndex: from,
+            endIndex: to,
+            text: run.text.slice(from - run.startIndex, to - run.startIndex),
+          }
+        : { startIndex: from, endIndex: to, inlineObjectId: run.inlineObjectId }
+    );
+  }
+  return out;
+}
+
+/** Slice metadata: the document's total extent, whether content follows the
+ * returned slice, and where a follow-up read continues. Without the total,
+ * a complete short document and a clipped long one return indistinguishable
+ * payloads — and those two situations need opposite next actions. */
+function sliceMeta(runs: DocRun[], end: number | undefined) {
+  const totalEndIndex = runs.length ? runs[runs.length - 1].endIndex : 0;
+  const to = end === undefined ? totalEndIndex : Math.min(end, totalEndIndex);
+  const clipped = to < totalEndIndex;
+  return {
+    to,
+    fields: { totalEndIndex, clipped, ...(clipped ? { nextStartIndex: to } : {}) },
+  };
+}
+
+function extractText(
+  data: Record<string, unknown>,
+  start?: number,
+  end?: number
+): Record<string, unknown> {
+  const runs = docRuns(data);
+  if (start === undefined && end === undefined) {
+    return docResult(data, { text: textOf(runs) });
+  }
+  const { to, fields } = sliceMeta(runs, end);
+  return docResult(data, {
+    text: textOf(clipRuns(runs, start ?? 0, to)),
+    ...fields,
+  });
 }
 
 /** Plain text of a document, for callers that want data rather than an MCP
@@ -181,13 +248,28 @@ export async function readDocText(
   return runsToText(result.data as Record<string, unknown>);
 }
 
-function extractIndexed(data: Record<string, unknown>): Record<string, unknown> {
-  const content = docRuns(data).map(({ startIndex, endIndex, text, inlineObjectId }) =>
+function indexedContent(runs: DocRun[]) {
+  return runs.map(({ startIndex, endIndex, text, inlineObjectId }) =>
     text !== undefined
       ? { startIndex, endIndex, text }
       : { startIndex, endIndex, inlineObjectId }
   );
-  return docResult(data, { content });
+}
+
+function extractIndexed(
+  data: Record<string, unknown>,
+  start?: number,
+  end?: number
+): Record<string, unknown> {
+  const runs = docRuns(data);
+  if (start === undefined && end === undefined) {
+    return docResult(data, { content: indexedContent(runs) });
+  }
+  const { to, fields } = sliceMeta(runs, end);
+  return docResult(data, {
+    content: indexedContent(clipRuns(runs, start ?? 0, to)),
+    ...fields,
+  });
 }
 
 export async function handleDocs(
@@ -197,13 +279,26 @@ export async function handleDocs(
 ) {
   switch (toolName) {
     case "docs_get": {
+      const mode = (args.mode as string) || "text";
+      const start = args.start_index as number | undefined;
+      const end = args.end_index as number | undefined;
+      if (mode === "full" && (start !== undefined || end !== undefined)) {
+        throw new Error(
+          'docs_get: start_index/end_index cannot be combined with mode "full" — ' +
+            'the raw API response has no meaningful slice. Use mode "text" or "index".'
+        );
+      }
+      if (start !== undefined && end !== undefined && start >= end) {
+        throw new Error(
+          `docs_get: start_index (${start}) must be less than end_index (${end}).`
+        );
+      }
       const result = await client.api("docs", "documents", "get", {
         params: { documentId: args.document_id },
       });
-      const mode = (args.mode as string) || "text";
       const data = result.data as Record<string, unknown>;
-      if (mode === "text") return jsonResponse(extractText(data));
-      if (mode === "index") return jsonResponse(extractIndexed(data));
+      if (mode === "text") return jsonResponse(extractText(data, start, end));
+      if (mode === "index") return jsonResponse(extractIndexed(data, start, end));
       return jsonResponse(data);
     }
 
