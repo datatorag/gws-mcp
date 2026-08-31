@@ -1,9 +1,10 @@
-import { errorMessage, type GwsClient } from "../gws-client.js";
+import type { GwsClient } from "../gws-client.js";
 import { CREATE, MUTATE, READ, ToolDef } from "./annotations.js";
 import { jsonResponse, deleteResponse } from "./response.js";
 import { deleteDriveFileResponse } from "./drive-ops.js";
 import {
   listTabs,
+  missingTabError,
   noSuchTabError,
   quoteTabForRange,
   resolveSheetId,
@@ -163,7 +164,7 @@ export const sheetsTools: ToolDef[] = [
         range: {
           type: "string",
           description:
-            "Cell range in A1 notation (e.g., \"Sheet1!A1:D10\", \"A1:Z\")",
+            'Cell range in A1 notation: "TabName!A1:D10" scoped to a tab the spreadsheet actually has, "A1:Z" for the first tab, or a bare tab name for a whole tab.',
         },
         value_render_option: {
           type: "string",
@@ -189,7 +190,8 @@ export const sheetsTools: ToolDef[] = [
         },
         range: {
           type: "string",
-          description: "Cell range in A1 notation (e.g., \"Sheet1!A1:B2\")",
+          description:
+            'Cell range in A1 notation, e.g. "TabName!A1:B2" — use a tab name the spreadsheet actually has.',
         },
         values: {
           type: "array",
@@ -230,7 +232,7 @@ export const sheetsTools: ToolDef[] = [
         range: {
           type: "string",
           description:
-            "Target range for appending (default: first sheet). e.g., \"Sheet1!A1\"",
+            'Target range naming the tab to append to, e.g. "TabName!A1". When omitted, "Sheet1!A1" is sent, which only works while the spreadsheet still has a tab literally named Sheet1 — pass the range explicitly otherwise.',
         },
         ...parseFormulasParam,
         ...valueInputOptionParam,
@@ -398,35 +400,6 @@ export const sheetsTools: ToolDef[] = [
   },
 ];
 
-/* ----------------------- range / tab error helpers ------------------------ */
-
-const UNPARSEABLE_RANGE = /unable to parse range/i;
-
-/** Google reports a range naming a missing tab as a SYNTAX error ("Unable to
- * parse range: …"), which sends users off to rewrite perfectly valid A1
- * notation. When the failed range names a tab, look up the spreadsheet's real
- * tab list and say what is actually wrong — and if the named tab does exist
- * (or the range has no tab prefix), returns undefined because then the
- * original error stands: the syntax genuinely is the problem. */
-async function missingTabError(
-  client: GwsClient,
-  spreadsheetId: unknown,
-  range: string,
-  err: unknown
-): Promise<Error | undefined> {
-  if (!UNPARSEABLE_RANGE.test(errorMessage(err))) return undefined;
-  const tab = tabNameFromRange(range);
-  if (!tab) return undefined;
-  let titles: string[];
-  try {
-    titles = tabTitles(await listTabs(client, spreadsheetId));
-  } catch {
-    return undefined;
-  }
-  if (titles.includes(tab)) return undefined;
-  return noSuchTabError(tab, titles, " Create it first with sheets_add_tab.");
-}
-
 /** Read a range and square it up (rows padded to equal width), for callers
  * that want data rather than an MCP response envelope (sheets_read itself,
  * drive_read_file). */
@@ -489,7 +462,14 @@ export async function handleSheets(
   } catch (err) {
     const range = rangeInvolvedIn(toolName, args);
     if (!range) throw err;
-    throw (await missingTabError(client, args.spreadsheet_id, range, err)) ?? err;
+    const better = await missingTabError(
+      client,
+      args.spreadsheet_id,
+      range,
+      err,
+      " Create it first with sheets_add_tab."
+    );
+    throw better ?? err;
   }
 }
 

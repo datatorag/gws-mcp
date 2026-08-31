@@ -4,6 +4,7 @@ import { jsonResponse } from "./response.js";
 import {
   columnIndexToLetter,
   columnLetterToIndex,
+  missingTabError,
   quoteTabForRange,
   splitRange,
 } from "./sheets-grid.js";
@@ -38,7 +39,7 @@ export const sheetsRowTools: ToolDef[] = [
         range: {
           type: "string",
           description:
-            'The range to search in A1 notation, e.g. "Sheet1!A:D" for whole columns, "Sheet1!A1:D500" for a block, or a bare tab name for the whole tab. Row numbers in the result are absolute sheet rows, so a range starting at A10 reports its first data row as 11.',
+            'The range to search: a tab name on its own searches that whole tab (the simplest correct call), or A1 notation naming a real tab, e.g. "TabName!A:D" for whole columns or "TabName!A1:D500" for a block — TabName stands for a tab the spreadsheet actually has. Row numbers in the result are absolute sheet rows, so a range starting at A10 reports its first data row as 11.',
         },
         column: {
           type: "string",
@@ -142,12 +143,24 @@ export async function handleSheetsRows(
   toolName: string,
   args: Record<string, unknown>
 ) {
-  switch (toolName) {
-    case "sheets_find_rows":
-      return findRows(client, args);
+  try {
+    switch (toolName) {
+      case "sheets_find_rows":
+        return await findRows(client, args);
 
-    default:
-      throw new Error(`Unknown Sheets row tool: ${toolName}`);
+      default:
+        throw new Error(`Unknown Sheets row tool: ${toolName}`);
+    }
+  } catch (err) {
+    // The same seam handleSheets has: Google reports a missing tab as a
+    // SYNTAX error ("Unable to parse range"), which reads as broken A1
+    // notation. missingTabError claims a missing tab only after confirming
+    // the tab is actually absent; every other failure surfaces untouched.
+    if (typeof args.range !== "string") throw err;
+    throw (
+      (await missingTabError(client, args.spreadsheet_id, args.range, err)) ??
+      err
+    );
   }
 }
 

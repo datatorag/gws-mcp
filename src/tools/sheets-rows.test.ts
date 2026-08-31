@@ -300,3 +300,64 @@ describe("sheets_find_rows", () => {
     ]);
   });
 });
+
+describe("sheets_find_rows against a tab that does not exist (SCRUM-177)", () => {
+  // Failing shape before the fix, stated up front: Google's raw
+  // "Unable to parse range: Ghost!A1:A100" surfaced verbatim, so the
+  // 'No sheet named' assertion below FAILED. The two pass-through cases
+  // are the positive controls in the same run: they prove this seam does
+  // not swallow other errors into a wrong missing-tab claim.
+  it("names the tabs the spreadsheet actually has", async () => {
+    const { client } = fakeClient([
+      { throws: "Unable to parse range: Ghost!A1:A100" },
+      {
+        data: {
+          sheets: [
+            { properties: { sheetId: 0, title: "Data" } },
+            { properties: { sheetId: 1, title: "Archive" } },
+          ],
+        },
+      },
+    ]);
+    await expect(
+      handleSheetsRows(client, "sheets_find_rows", {
+        spreadsheet_id: "sheet-1",
+        range: "Ghost!A1:A100",
+        column: "A",
+        values: ["x"],
+      })
+    ).rejects.toThrow(
+      'No sheet named "Ghost" in this spreadsheet. Existing tabs: "Data", "Archive".'
+    );
+  });
+
+  it("control: an unrelated Google error passes through untouched", async () => {
+    const { client, calls } = fakeClient([
+      { throws: "The caller does not have permission" },
+    ]);
+    await expect(
+      handleSheetsRows(client, "sheets_find_rows", {
+        spreadsheet_id: "sheet-1",
+        range: "Data!A1:A100",
+        column: "A",
+        values: ["x"],
+      })
+    ).rejects.toThrow("The caller does not have permission");
+    expect(calls).toHaveLength(1); // no tab-list lookup for a non-range error
+  });
+
+  it("control: an unparseable range whose tab EXISTS keeps the raw error", async () => {
+    const { client } = fakeClient([
+      { throws: "Unable to parse range: Data!A0:A" },
+      { data: { sheets: [{ properties: { sheetId: 0, title: "Data" } }] } },
+    ]);
+    await expect(
+      handleSheetsRows(client, "sheets_find_rows", {
+        spreadsheet_id: "sheet-1",
+        range: "Data!A0:A",
+        column: "A",
+        values: ["x"],
+      })
+    ).rejects.toThrow("Unable to parse range: Data!A0:A");
+  });
+});

@@ -1,4 +1,4 @@
-import type { GwsClient } from "../gws-client.js";
+import { errorMessage, type GwsClient } from "../gws-client.js";
 
 /**
  * Shared grid geometry for the Sheets tools.
@@ -209,6 +209,37 @@ export function noSuchTabError(tab: string, titles: string[], hint = ""): Error 
     `No sheet named "${tab}" in this spreadsheet. Existing tabs: ` +
       `${titles.map((t) => `"${t}"`).join(", ") || "(none)"}.${hint}`
   );
+}
+
+const UNPARSEABLE_RANGE = /unable to parse range/i;
+
+/** Google reports a range naming a missing tab as a SYNTAX error ("Unable to
+ * parse range: …"), which sends users off to rewrite perfectly valid A1
+ * notation. When the failed range names a tab, look up the spreadsheet's real
+ * tab list and say what is actually wrong. Returns undefined for every other
+ * failure — a different Google error, a range with no tab prefix, or an
+ * unparseable range whose tab DOES exist — because then the original error
+ * stands: claiming a missing tab that is not missing would send the caller
+ * off to fix the wrong thing. Shared by every handler that passes a raw A1
+ * range to the values endpoints. */
+export async function missingTabError(
+  client: GwsClient,
+  spreadsheetId: unknown,
+  range: string,
+  err: unknown,
+  hint = ""
+): Promise<Error | undefined> {
+  if (!UNPARSEABLE_RANGE.test(errorMessage(err))) return undefined;
+  const tab = tabNameFromRange(range);
+  if (!tab) return undefined;
+  let titles: string[];
+  try {
+    titles = tabTitles(await listTabs(client, spreadsheetId));
+  } catch {
+    return undefined;
+  }
+  if (titles.includes(tab)) return undefined;
+  return noSuchTabError(tab, titles, hint);
 }
 
 /** Resolve a tab title to the sheetId the batchUpdate API needs.
