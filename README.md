@@ -33,6 +33,8 @@ This server powers the Google Workspace connector of [DataToRAG](https://datator
 
 **gmail_mark_read** — Marks messages as read by removing the UNREAD label. Also supports adding/removing arbitrary labels (STARRED, IMPORTANT, etc.) via `add_labels` and `remove_labels` arrays. Pass `message_id` for a single message, or `message_ids` (up to 1000) to modify a batch in one API call via `users.messages.batchModify`. Removes UNREAD by default when no label arrays are given.
 
+**gmail_label_message**: Labels many messages in one call. Pass `message_ids` (up to 1000) with `add_labels` and/or `remove_labels` and every message is modified by a single `users.messages.batchModify` request; the label-and-mark-read pair is one call (`add_labels: ["<label id>"]`, `remove_labels: ["UNREAD"]`). Returns a per-message outcome (`results[]`: id, ok, error), and if the batch request is refused each id is retried on its own so a partial batch is visible. `message_id` is for a single message only.
+
 **gmail_list_filters** — Reads the filters a mailbox already has, so you can see
 what automation exists before adding more. Reading filters works under
 `gmail.modify`.

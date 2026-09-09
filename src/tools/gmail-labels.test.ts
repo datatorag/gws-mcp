@@ -155,6 +155,87 @@ describe("gmail_label_message vs gmail_mark_read", () => {
   });
 });
 
+/* SCRUM-233: the batch form is the one to reach for, and a partial batch is
+ * visible. The screenshot this fixes had the tool called once per message
+ * and the turn stopping after a handful; the description now leads with
+ * "many messages in one call", and every id gets its own outcome. */
+describe("gmail_label_message as a batch tool", () => {
+  it("reports a per-message outcome for every id in a successful batch, with ONE API call", async () => {
+    const { client, calls } = fakeClient([{ data: "" }]);
+
+    const result = await handleGmail(client, "gmail_label_message", {
+      message_ids: ["a", "b", "c"],
+      add_labels: ["Label_12"],
+      remove_labels: ["UNREAD"],
+    });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      resource: "users.messages",
+      method: "batchModify",
+      jsonBody: { ids: ["a", "b", "c"], addLabelIds: ["Label_12"], removeLabelIds: ["UNREAD"] },
+    });
+    expect(payload(result)).toMatchObject({
+      modified: 3,
+      failed: 0,
+      results: [
+        { id: "a", ok: true },
+        { id: "b", ok: true },
+        { id: "c", ok: true },
+      ],
+    });
+  });
+
+  it("falls back to one modify per id when the batch is refused, so a partial batch is visible", async () => {
+    // batchModify rejects the whole request over one bad id; the fallback
+    // says which ids went through and which did not.
+    const { client, calls } = fakeClient([
+      { throws: "Invalid id value" },
+      { data: { id: "a" } },
+      { throws: "Requested entity was not found." },
+      { data: { id: "c" } },
+    ]);
+
+    const result = await handleGmail(client, "gmail_label_message", {
+      message_ids: ["a", "b", "c"],
+      remove_labels: ["UNREAD"],
+    });
+
+    expect(calls.map((c) => c.method)).toEqual(["batchModify", "modify", "modify", "modify"]);
+    expect(payload(result)).toMatchObject({
+      modified: 2,
+      failed: 1,
+      results: [
+        { id: "a", ok: true },
+        { id: "b", ok: false, error: "Requested entity was not found." },
+        { id: "c", ok: true },
+      ],
+    });
+  });
+
+  it("refuses more ids than one batch call can carry, naming the limit", async () => {
+    const { client } = fakeClient([]);
+    await expect(
+      handleGmail(client, "gmail_label_message", {
+        message_ids: Array.from({ length: 1001 }, (_, i) => `m${i}`),
+        remove_labels: ["UNREAD"],
+      })
+    ).rejects.toThrow("1000");
+  });
+
+  it("describes itself batch-first, so a model does not call it once per message", () => {
+    const tool = gmailTools.find((t) => t.name === "gmail_label_message")!;
+    expect(tool.description.toLowerCase().startsWith("label many messages in one call")).toBe(true);
+    expect(tool.description).toContain("message_ids");
+    expect(tool.description).toContain('remove_labels: ["UNREAD"]');
+    const props = tool.inputSchema.properties as Record<string, { description: string }>;
+    // The batch parameter is listed first and says so.
+    expect(Object.keys(props)[0]).toBe("message_ids");
+    expect(props.message_ids.description).toContain("one call");
+    expect(props.message_id.description.toLowerCase()).toContain("single");
+  });
+});
+
 describe("label tool annotations", () => {
   it.each([
     ["gmail_list_labels", READ("List email labels")],

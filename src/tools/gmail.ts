@@ -367,29 +367,30 @@ export const gmailTools: ToolDef[] = [
   {
     name: "gmail_label_message",
     description:
-      "Add or remove labels on one or more messages. Removing the INBOX label archives a message; removing UNREAD marks it read. Label IDs come from gmail_list_labels. To only flip read state, gmail_mark_read is the narrower tool.",
+      'Label many messages in ONE call: pass message_ids (up to 1000) with add_labels and/or remove_labels, and every message is modified by a single users.messages.batchModify request. Do not call this once per message. The label-and-mark-read pair is one call: add_labels: ["<label id>"], remove_labels: ["UNREAD"]. Removing INBOX archives; removing UNREAD marks read. Label IDs come from gmail_list_labels. Returns a per-message outcome (results[]: id, ok, error) so a partial batch is visible; if the batch request is refused, each id is retried on its own and reported. message_id is for a single message only.',
     inputSchema: {
       type: "object",
       properties: {
-        message_id: {
-          type: "string",
-          description: "A single message ID to modify",
-        },
         message_ids: {
           type: "array",
           items: { type: "string" },
-          description: "Several message IDs to modify in one call",
+          description:
+            "The message IDs to modify together in one call, up to 1000. Prefer this over message_id whenever there is more than one message.",
+        },
+        message_id: {
+          type: "string",
+          description: "A single message ID, for the one-message case only. Provide either this or message_ids.",
         },
         add_labels: {
           type: "array",
           items: { type: "string" },
-          description: "Label IDs to add, e.g. [\"Label_12\"]",
+          description: 'Label IDs to add, e.g. ["Label_12"]',
         },
         remove_labels: {
           type: "array",
           items: { type: "string" },
           description:
-            "Label IDs to remove, e.g. [\"INBOX\"] to archive or [\"UNREAD\"] to mark read",
+            'Label IDs to remove, e.g. ["INBOX"] to archive or ["UNREAD"] to mark read; combine with add_labels to label and mark read in the same call',
         },
       },
       required: [],
@@ -655,6 +656,9 @@ async function findLabelByName(
 /** Apply a label modification to one message or a batch of them. Shared by
  * gmail_mark_read and gmail_label_message, which build different bodies (see
  * their cases) but issue the same call. */
+/** One batchModify request carries at most this many ids (Google's limit). */
+const BATCH_MODIFY_MAX = 1000;
+
 async function modifyMessageLabels(
   client: GwsClient,
   args: Record<string, unknown>,
@@ -662,12 +666,39 @@ async function modifyMessageLabels(
 ) {
   const ids = args.message_ids as string[] | undefined;
   if (ids?.length) {
-    // batchModify returns an empty body on success
-    await client.api("gmail", "users.messages", "batchModify", {
-      params: { userId: "me" },
-      jsonBody: { ids, ...body },
-    });
-    return jsonResponse({ modified: ids.length, ids, ...body });
+    if (ids.length > BATCH_MODIFY_MAX) {
+      throw new Error(
+        `message_ids carries ${ids.length} ids; one call takes at most ${BATCH_MODIFY_MAX}. Split the batch.`
+      );
+    }
+    // SCRUM-233: one request for the whole batch, and a per-message outcome
+    // either way. batchModify answers with an empty body on success and
+    // refuses the WHOLE request when any id is bad, so on a refusal each id
+    // is modified on its own and reported, which is what makes a partial
+    // batch visible instead of a silent all-or-nothing.
+    let results: Array<{ id: string; ok: boolean; error?: string }>;
+    try {
+      await client.api("gmail", "users.messages", "batchModify", {
+        params: { userId: "me" },
+        jsonBody: { ids, ...body },
+      });
+      results = ids.map((id) => ({ id, ok: true }));
+    } catch {
+      results = [];
+      for (const id of ids) {
+        try {
+          await client.api("gmail", "users.messages", "modify", {
+            params: { userId: "me", id },
+            jsonBody: body,
+          });
+          results.push({ id, ok: true });
+        } catch (err) {
+          results.push({ id, ok: false, error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+    }
+    const modified = results.filter((r) => r.ok).length;
+    return jsonResponse({ modified, failed: results.length - modified, ids, results, ...body });
   }
 
   if (!args.message_id) {
