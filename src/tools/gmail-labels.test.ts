@@ -47,6 +47,66 @@ describe("gmail_create_label", () => {
     expect(calls[1]).toMatchObject({ resource: "users.labels", method: "list" });
   });
 
+  /* SCRUM-247: creating a label that already exists is not a failure, it is
+   * the label. Without this a skill had to list every mailbox's labels before
+   * creating one, to learn one bit per mailbox; a seven-account run paid for
+   * seven full label lists on every later step. */
+  it("returns the existing label as found when the API refuses the name as taken", async () => {
+    const { client, calls } = fakeClient([
+      { throws: "409 Label name exists or conflicts" },
+      {
+        data: {
+          labels: [
+            { id: "INBOX", name: "INBOX", type: "system" },
+            { id: "Label_7", name: "Triaged/2026-09-10", type: "user" },
+          ],
+        },
+      },
+    ]);
+
+    const result = await handleGmail(client, "gmail_create_label", {
+      name: "Triaged/2026-09-10",
+    });
+
+    expect(payload(result)).toEqual({
+      id: "Label_7",
+      name: "Triaged/2026-09-10",
+      type: "user",
+      existed: true,
+    });
+    expect(calls[1]).toMatchObject({ resource: "users.labels", method: "list" });
+  });
+
+  it("a second create of the same name answers with the same id", async () => {
+    const created = { id: "Label_7", name: "Triaged/2026-09-10", type: "user" };
+    const { client } = fakeClient([
+      { data: created },
+      { throws: "409 Label name exists or conflicts" },
+      { data: { labels: [created] } },
+    ]);
+    const first = payload(await handleGmail(client, "gmail_create_label", { name: created.name }));
+    const second = payload(await handleGmail(client, "gmail_create_label", { name: created.name }));
+    expect(first.id).toBe("Label_7");
+    expect(second.id).toBe("Label_7");
+    expect(first.existed).toBeUndefined();
+    expect(second.existed).toBe(true);
+  });
+
+  it("rethrows a refusal that is not about the name being taken", async () => {
+    const { client } = fakeClient([{ throws: "403 insufficient permissions" }]);
+    await expect(
+      handleGmail(client, "gmail_create_label", { name: "Triaged/2026-09-10" })
+    ).rejects.toThrow("403 insufficient permissions");
+  });
+
+  it("describes itself as safe to call once per run: an existing label comes back as found", () => {
+    const tool = gmailTools.find((t) => t.name === "gmail_create_label")!;
+    expect(tool.description).toMatch(/already exists/i);
+    expect(tool.description).toMatch(/found/i);
+    expect(tool.description).not.toMatch(/Use gmail_list_labels to see existing labels/);
+    expect(tool.description).not.toContain("\u2014");
+  });
+
   it("says how to recover rather than returning an empty success", async () => {
     const { client } = fakeClient([{ data: "" }, { data: { labels: [] } }]);
 

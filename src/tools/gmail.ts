@@ -292,7 +292,7 @@ export const gmailTools: ToolDef[] = [
   {
     name: "gmail_create_label",
     description:
-      "Create a Gmail label. Nested labels use '/' in the name (e.g. 'Alerts/Invoices'). Returns the created label including its ID, which can be used with gmail_label_message. Use gmail_list_labels to see existing labels.",
+      "Create a Gmail label, or find it if it already exists. Nested labels use '/' in the name (e.g. 'Alerts/Invoices'). Returns the label including its ID, which can be used with gmail_label_message; when a label with that name already exists the existing label is returned as found (existed: true), so it is safe to call once per run without listing labels first.",
     inputSchema: {
       type: "object",
       properties: {
@@ -642,6 +642,14 @@ export interface GmailLabel {
 
 /** Find a label by its display name. Used to recover the label a create call
  * made when the API answers with an empty body. */
+/** Gmail refuses a duplicate label name with a 409 whose reason reads
+ * "Label name exists or conflicts"; the CLI surfaces that text, or the
+ * status, or both. Anything else is a different refusal. */
+function isLabelExistsError(err: unknown): boolean {
+  const text = err instanceof Error ? err.message : String(err);
+  return /\b409\b|already exists|name exists|conflict/i.test(text);
+}
+
 async function findLabelByName(
   client: GwsClient,
   name: string
@@ -935,10 +943,22 @@ export async function handleGmail(
     }
 
     case "gmail_create_label": {
-      const result = await client.api("gmail", "users.labels", "create", {
-        params: { userId: "me" },
-        jsonBody: { name: args.name },
-      });
+      let result;
+      try {
+        result = await client.api("gmail", "users.labels", "create", {
+          params: { userId: "me" },
+          jsonBody: { name: args.name },
+        });
+      } catch (err) {
+        // SCRUM-247: a name that is already taken is not a failure, it is
+        // the label. Answer with the existing one, marked as found, so a
+        // caller can create once per run and never has to list every label
+        // first to learn whether one exists. Any other refusal stays an error.
+        if (!isLabelExistsError(err)) throw err;
+        const existing = await findLabelByName(client, args.name as string);
+        if (!existing) throw err;
+        return jsonResponse({ ...existing, existed: true });
+      }
       // The label is created, but this call can come back with an empty
       // body, which used to be returned verbatim: the tool promised "the
       // created label including its ID" and handed back nothing, breaking
