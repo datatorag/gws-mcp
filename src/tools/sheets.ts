@@ -153,7 +153,7 @@ export const sheetsTools: ToolDef[] = [
   {
     name: "sheets_read",
     description:
-      "Read data from a Google Sheets spreadsheet. Returns cell values for the specified range.",
+      "Read data from a Google Sheets spreadsheet. Returns cell values for one range, or for many ranges in one call: pass range for one block, or ranges for several blocks returned in the order given, each with the range the API echoed back.",
     inputSchema: {
       type: "object",
       properties: {
@@ -164,7 +164,13 @@ export const sheetsTools: ToolDef[] = [
         range: {
           type: "string",
           description:
-            'Cell range in A1 notation: "TabName!A1:D10" scoped to a tab the spreadsheet actually has, "A1:Z" for the first tab, or a bare tab name for a whole tab.',
+            'Cell range in A1 notation: "TabName!A1:D10" scoped to a tab the spreadsheet actually has, "A1:Z" for the first tab, or a bare tab name for a whole tab. Give range or ranges, not both.',
+        },
+        ranges: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            'Several A1 ranges read in one request, e.g. ["Sheet1!A1:D1", "Sheet1!A2:D50", "Totals!A1:B5"]. The response carries one block per range, in this order, each with rowCount, columnCount and values. Use this instead of several sheets_read calls. Give range or ranges, not both.',
         },
         value_render_option: {
           type: "string",
@@ -173,7 +179,7 @@ export const sheetsTools: ToolDef[] = [
             "How values are rendered. FORMATTED_VALUE (default) returns what the cell displays. UNFORMATTED_VALUE returns the underlying typed value, which is how you tell a stored number from stored text. FORMULA returns the cell's formula where it has one — the only way to tell a live formula from text that merely looks like one, so use it to verify a write.",
         },
       },
-      required: ["spreadsheet_id", "range"],
+      required: ["spreadsheet_id"],
     },
     annotations: READ("Read spreadsheet range"),
   },
@@ -403,6 +409,24 @@ export const sheetsTools: ToolDef[] = [
 /** Read a range and square it up (rows padded to equal width), for callers
  * that want data rather than an MCP response envelope (sheets_read itself,
  * drive_read_file). */
+/** One value range as the API returns it, padded to a rectangle so every row
+ * has every column; the echoed range is the API's, not the caller's. */
+function normalizeValueRange(data: { range?: unknown; values?: string[][] }) {
+  const values = data.values || [];
+  const columnCount = values.reduce((max, row) => Math.max(max, row.length), 0);
+  const normalized = values.map((row) =>
+    row.length < columnCount
+      ? [...row, ...Array(columnCount - row.length).fill("")]
+      : row
+  );
+  return {
+    range: data.range,
+    rowCount: normalized.length,
+    columnCount,
+    values: normalized,
+  };
+}
+
 export async function readSheetValues(
   client: GwsClient,
   spreadsheetId: unknown,
@@ -419,20 +443,40 @@ export async function readSheetValues(
       ...(valueRenderOption ? { valueRenderOption } : {}),
     },
   });
-  const data = result.data as Record<string, unknown>;
-  const values = (data.values as string[][] | undefined) || [];
-  const columnCount = values.reduce((max, row) => Math.max(max, row.length), 0);
-  const normalized = values.map((row) =>
-    row.length < columnCount
-      ? [...row, ...Array(columnCount - row.length).fill("")]
-      : row
-  );
-  return {
-    range: data.range,
-    rowCount: normalized.length,
-    columnCount,
-    values: normalized,
+  return normalizeValueRange(result.data as { range?: unknown; values?: string[][] });
+}
+
+/** Several ranges in ONE request (SCRUM-246). The transport cannot carry an
+ * array-valued query parameter, so values.batchGet (ranges=...) is out of
+ * reach; values.batchGetByDataFilter takes the ranges in a JSON body and
+ * answers with one value range per filter, in the order given. A range that
+ * exists but is empty comes back as an empty block with its echoed range; a
+ * tab that does not exist fails the whole call, which the missing-tab seam
+ * then explains. */
+export async function readSheetRanges(
+  client: GwsClient,
+  spreadsheetId: unknown,
+  ranges: unknown[],
+  valueRenderOption?: unknown
+) {
+  const a1 = ranges.filter((r): r is string => typeof r === "string" && r.length > 0);
+  if (a1.length === 0 || a1.length !== ranges.length) {
+    throw new Error("ranges must hold at least one A1 range string.");
+  }
+  const result = await client.api("sheets", "spreadsheets.values", "batchGetByDataFilter", {
+    params: { spreadsheetId },
+    jsonBody: {
+      dataFilters: a1.map((a1Range) => ({ a1Range })),
+      ...(valueRenderOption ? { valueRenderOption } : {}),
+    },
+  });
+  const data = result.data as {
+    valueRanges?: Array<{ valueRange?: { range?: unknown; values?: string[][] } }>;
   };
+  const blocks = (data.valueRanges ?? []).map((entry) =>
+    normalizeValueRange(entry.valueRange ?? {})
+  );
+  return { blocks };
 }
 
 const APPEND_DEFAULT_RANGE = "Sheet1!A1";
@@ -445,6 +489,7 @@ function rangeInvolvedIn(
   args: Record<string, unknown>
 ): string | undefined {
   if (typeof args.range === "string") return args.range;
+  if (Array.isArray(args.ranges) && typeof args.ranges[0] === "string") return args.ranges[0];
   if (toolName === "sheets_append") return APPEND_DEFAULT_RANGE;
   if (toolName === "sheets_add_tab" && typeof args.title === "string") {
     return `${quoteTabForRange(args.title)}!A1`;
@@ -479,7 +524,25 @@ async function dispatchSheets(
   args: Record<string, unknown>
 ) {
   switch (toolName) {
-    case "sheets_read":
+    case "sheets_read": {
+      const hasRange = typeof args.range === "string";
+      const hasRanges = Array.isArray(args.ranges);
+      if (hasRange && hasRanges) {
+        throw new Error("Give one of range or ranges, not both.");
+      }
+      if (!hasRange && !hasRanges) {
+        throw new Error("Provide range (one block) or ranges (several blocks in one call).");
+      }
+      if (hasRanges) {
+        return jsonResponse(
+          await readSheetRanges(
+            client,
+            args.spreadsheet_id,
+            args.ranges as unknown[],
+            args.value_render_option
+          )
+        );
+      }
       return jsonResponse(
         await readSheetValues(
           client,
@@ -488,6 +551,7 @@ async function dispatchSheets(
           args.value_render_option
         )
       );
+    }
 
     case "sheets_update": {
       const { valueInputOption, values } = resolveValueInput(args);

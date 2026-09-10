@@ -662,3 +662,94 @@ describe("sheets_batch_update", () => {
     expect(tool?.inputSchema.required).toEqual(["spreadsheet_id", "requests"]);
   });
 });
+
+/* SCRUM-246: several ranges in ONE request. The transport cannot carry an
+ * array-valued query parameter, so values.batchGet (ranges=...) is out of
+ * reach; values.batchGetByDataFilter takes the ranges in a JSON body and
+ * answers with one value range per filter, in order. A caller who needs the
+ * header row and a data block, or three tabs, pays one round trip. */
+describe("sheets_read with ranges[] (SCRUM-246)", () => {
+  it("issues ONE batchGetByDataFilter with the ranges in order and returns one block per range in order", async () => {
+    const { client, calls } = fakeClient([
+      {
+        data: {
+          spreadsheetId: "s",
+          valueRanges: [
+            { valueRange: { range: "Sheet1!A1:B1", values: [["h1", "h2"]] } },
+            { valueRange: { range: "Sheet1!A2:B3", values: [["1"], ["2", "x"]] } },
+            { valueRange: { range: "Other!A1:A2" } },
+          ],
+        },
+      },
+    ]);
+    const result = payload(
+      await handleSheets(client, "sheets_read", {
+        spreadsheet_id: "s",
+        ranges: ["Sheet1!A1:B1", "Sheet1!A2:B3", "Other!A1:A2"],
+        value_render_option: "UNFORMATTED_VALUE",
+      })
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      service: "sheets",
+      resource: "spreadsheets.values",
+      method: "batchGetByDataFilter",
+      params: { spreadsheetId: "s" },
+      jsonBody: {
+        dataFilters: [{ a1Range: "Sheet1!A1:B1" }, { a1Range: "Sheet1!A2:B3" }, { a1Range: "Other!A1:A2" }],
+        valueRenderOption: "UNFORMATTED_VALUE",
+      },
+    });
+    expect(result.blocks).toHaveLength(3);
+    expect(result.blocks[0]).toEqual({ range: "Sheet1!A1:B1", rowCount: 1, columnCount: 2, values: [["h1", "h2"]] });
+    // Ragged rows are padded the same way the single-range read pads them.
+    expect(result.blocks[1]).toEqual({ range: "Sheet1!A2:B3", rowCount: 2, columnCount: 2, values: [["1", ""], ["2", "x"]] });
+    // An empty range is an empty block, still in its place.
+    expect(result.blocks[2]).toEqual({ range: "Other!A1:A2", rowCount: 0, columnCount: 0, values: [] });
+  });
+
+  it("omits valueRenderOption from the body when the caller did not set it", async () => {
+    const { client, calls } = fakeClient([{ data: { valueRanges: [{ valueRange: { range: "A1", values: [["a"]] } }] } }]);
+    await handleSheets(client, "sheets_read", { spreadsheet_id: "s", ranges: ["A1"] });
+    expect((calls[0].jsonBody as Record<string, unknown>)).not.toHaveProperty("valueRenderOption");
+  });
+
+  it("keeps the single range path exactly as it was: values.get, no body", async () => {
+    const { client, calls } = fakeClient([{ data: { range: "A1", values: [["a"]] } }]);
+    const result = payload(await handleSheets(client, "sheets_read", { spreadsheet_id: "s", range: "A1" }));
+    expect(calls[0]).toMatchObject({ resource: "spreadsheets.values", method: "get", params: { spreadsheetId: "s", range: "A1" } });
+    expect(calls[0]).not.toHaveProperty("jsonBody");
+    expect(result).toEqual({ range: "A1", rowCount: 1, columnCount: 1, values: [["a"]] });
+  });
+
+  it("refuses a call with neither range nor ranges, and one with both, naming the fields", async () => {
+    const { client, calls } = fakeClient([]);
+    await expect(handleSheets(client, "sheets_read", { spreadsheet_id: "s" })).rejects.toThrow(/range.*ranges|ranges.*range/);
+    await expect(
+      handleSheets(client, "sheets_read", { spreadsheet_id: "s", range: "A1", ranges: ["A1"] })
+    ).rejects.toThrow(/one of/);
+    await expect(handleSheets(client, "sheets_read", { spreadsheet_id: "s", ranges: [] })).rejects.toThrow(/at least one/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("explains a missing tab for a ranged read the same way it does for a single range", async () => {
+    const { client } = fakeClient([
+      { throws: "Unable to parse range: Ghost!A1:B2" },
+      { data: { sheets: [{ properties: { title: "Sheet1" } }] } },
+    ]);
+    await expect(
+      handleSheets(client, "sheets_read", { spreadsheet_id: "s", ranges: ["Ghost!A1:B2", "Sheet1!A1"] })
+    ).rejects.toThrow(/Ghost/);
+  });
+
+  it("describes ranges[] and keeps range, so a model can pick either", () => {
+    const read = sheetsTools.find((t) => t.name === "sheets_read")!;
+    const props = read.inputSchema.properties as Record<string, { type?: string; description?: string; items?: unknown }>;
+    expect(props.range?.type).toBe("string");
+    expect(props.ranges?.type).toBe("array");
+    expect(props.ranges?.description).toMatch(/one request/i);
+    expect(read.inputSchema.required).toEqual(["spreadsheet_id"]);
+    expect(read.description).toMatch(/ranges/);
+    expect(read.description).not.toContain("\u2014");
+  });
+});
