@@ -220,3 +220,90 @@ describe("body/html_body contract errors fire before any call", () => {
     expect(calls).toHaveLength(0);
   });
 });
+
+/* SCRUM-249: a header is ASCII or it is not a header. The raw builder used to
+ * write the subject and the address display names as given, so an em-dash, an
+ * accented letter or a CJK character went out as raw UTF-8 bytes and arrived
+ * as mojibake. Encoded per RFC 2047 now, and a plain-text send whose headers
+ * need it takes the raw path too, so the encoding is ours on every route. */
+describe("non-ASCII headers are RFC 2047 encoded (SCRUM-249)", () => {
+  function decodeHeader(value: string): string {
+    return value
+      .replace(/\r\n[ \t]/g, "")
+      .replace(/(\?=)\s+(=\?)/g, "$1$2")
+      .replace(/=\?UTF-8\?B\?([A-Za-z0-9+/=]*)\?=/g, (_m, b64: string) =>
+        Buffer.from(b64, "base64").toString("utf-8")
+      );
+  }
+  /** The Subject header line of a raw MIME string, folded continuation included. */
+  function subjectLine(mime: string): string {
+    const head = mime.split("\r\n\r\n")[0];
+    const m = /^Subject: ((?:.*)(?:\r\n[ \t].*)*)/m.exec(head);
+    if (!m) throw new Error("no Subject header");
+    return m[1];
+  }
+
+  it.each([
+    ["an em-dash", "Launch — tomorrow"],
+    ["an accented letter", "Résumé attached"],
+    ["a CJK character", "会議のメモ"],
+  ])("html send: a subject with %s goes out ASCII-only and reads back exactly", async (_l, subject) => {
+    const { client, calls } = fakeClient([{ data: { id: "m1" } }]);
+    await handleGmail(client, "gmail_send", {
+      to: "a@example.com",
+      subject,
+      html_body: "<p>hi</p>",
+    });
+    const mime = rawMime(calls[0]);
+    const line = subjectLine(mime);
+    expect(line).not.toMatch(/[^\x20-\x7e\r\n]/);
+    expect(decodeHeader(line)).toBe(subject);
+  });
+
+  it("plain send with a non-ASCII subject takes the raw API path with the encoded header", async () => {
+    const { client, calls } = fakeClient([{ data: { id: "m1" } }]);
+    await handleGmail(client, "gmail_send", {
+      to: "a@example.com",
+      subject: "Café — 東京",
+      body: "plain words",
+    });
+    expect(calls[0]).toMatchObject({ service: "gmail", resource: "users.messages", method: "send" });
+    const mime = rawMime(calls[0]);
+    expect(decodeHeader(subjectLine(mime))).toBe("Café — 東京");
+    expect(mime).toContain("Content-Type: text/plain; charset=utf-8");
+    expect(mime.split("\r\n\r\n").slice(1).join("\r\n\r\n")).toContain("plain words");
+  });
+
+  it("plain send with ASCII headers still goes through the CLI helper", async () => {
+    const { client, calls } = fakeClient([{ data: { id: "m1" } }]);
+    await handleGmail(client, "gmail_send", { to: "a@example.com", subject: "Hi", body: "x" });
+    expect(calls[0]).toMatchObject({ command: "send" });
+  });
+
+  it("drafts encode the display name in To and leave the address bare", async () => {
+    const { client, calls } = fakeClient([{ data: { id: "d1", message: { id: "m1" } } }]);
+    await handleGmail(client, "gmail_create_draft", {
+      to: "Jörg Müller <jorg@example.com>",
+      subject: "Hi",
+      body: "x",
+    });
+    const mime = rawMime(calls[0]);
+    const to = /^To: (.*)$/m.exec(mime)![1];
+    expect(to).toMatch(/^=\?UTF-8\?B\?[A-Za-z0-9+/=]+\?= <jorg@example.com>$/);
+    expect(decodeHeader(to)).toBe("Jörg Müller <jorg@example.com>");
+  });
+});
+
+describe("the raw builder refuses a line break in a header (SCRUM-249)", () => {
+  it.each(["subject", "to", "cc", "bcc"])("rejects a %s carrying CR or LF instead of emitting a second header", async (field) => {
+    const { client, calls } = fakeClient([{ data: { id: "m1" } }]);
+    const args: Record<string, unknown> = {
+      to: "a@example.com",
+      subject: "Hi",
+      html_body: "<p>hi</p>",
+      [field]: field === "subject" ? "Hi\r\nBcc: x@example.com" : "a@example.com\nBcc: x@example.com",
+    };
+    await expect(handleGmail(client, "gmail_send", args)).rejects.toThrow(/line break/);
+    expect(calls).toHaveLength(0);
+  });
+});

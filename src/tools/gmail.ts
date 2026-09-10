@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import type { GwsClient } from "../gws-client.js";
 import { deleteResponse, jsonResponse, stripHtml, truncate } from "./response.js";
+import { encodeAddressHeader, encodeHeaderValue, isAscii } from "./mime-headers.js";
 
 // Shared to/subject/body/cc/bcc schema for gmail_send and the draft tools
 const emailFields = {
@@ -553,12 +554,21 @@ function buildRawMessage(
   args: Record<string, unknown>
 ): string {
   const { body, html } = resolveBody(toolName, args);
+  // A header is ASCII or it is not a header (SCRUM-249): the subject and any
+  // display name go out RFC 2047 encoded when they need it, addresses never.
+  // A line break in any of them is refused outright: encoded it would be
+  // harmless, bare it would start a header the caller never asked for.
+  for (const k of ["to", "subject", "cc", "bcc"]) {
+    if (typeof args[k] === "string" && /[\r\n]/.test(args[k] as string)) {
+      throw new Error(`${k} must not contain a line break`);
+    }
+  }
   const headers = [
-    `To: ${args.to as string}`,
-    `Subject: ${args.subject as string}`,
+    `To: ${encodeAddressHeader(args.to as string)}`,
+    `Subject: ${encodeHeaderValue(args.subject as string)}`,
   ];
-  if (args.cc) headers.push(`Cc: ${args.cc as string}`);
-  if (args.bcc) headers.push(`Bcc: ${args.bcc as string}`);
+  if (args.cc) headers.push(`Cc: ${encodeAddressHeader(args.cc as string)}`);
+  if (args.bcc) headers.push(`Bcc: ${encodeAddressHeader(args.bcc as string)}`);
   headers.push("MIME-Version: 1.0");
 
   let content: string;
@@ -730,7 +740,13 @@ export async function handleGmail(
   switch (toolName) {
     case "gmail_send": {
       const { html } = resolveBody(toolName, args);
-      if (html !== undefined) {
+      // A plain send with a non-ASCII subject or display name takes the raw
+      // path as well (SCRUM-249), so the header encoding is this module's on
+      // every route rather than left to the CLI's own MIME writer.
+      const needsEncoding = ["subject", "to", "cc", "bcc"].some(
+        (k) => typeof args[k] === "string" && !isAscii(args[k] as string)
+      );
+      if (html !== undefined || needsEncoding) {
         // The CLI's +send --html emits a single text/html part with no
         // fallback; the raw API path sends multipart/alternative instead,
         // the same shape as the draft tools.
