@@ -446,13 +446,68 @@ export async function readSheetValues(
   return normalizeValueRange(result.data as { range?: unknown; values?: string[][] });
 }
 
+/** The cells an A1 range names, spelled one way, so a request and the API's
+ * echo of it compare equal: the API answers "Tab!J1:J1" as "Tab!J1", may
+ * change letter case, and quotes a tab name only when it has to. */
+function a1Key(a1: string): string {
+  const s = a1.trim();
+  const bang = s.lastIndexOf("!");
+  const tab = bang === -1 ? "" : s.slice(0, bang).replace(/^'(.*)'$/, "$1");
+  let cells = (bang === -1 ? s : s.slice(bang + 1)).toUpperCase();
+  const [from, to] = cells.split(":");
+  if (to !== undefined && from === to) cells = from;
+  return `${tab.toLowerCase()}!${cells}`;
+}
+
+type MatchedValueRange = {
+  dataFilters?: Array<{ a1Range?: unknown }>;
+  valueRange?: { range?: unknown; values?: string[][] };
+};
+
+/** Puts each answer at the index of the request it answers (SCRUM-253).
+ * values.batchGetByDataFilter does not promise the request order (the
+ * first real calls came back sorted by something else), but each answer
+ * echoes the filter it matched. That echo places it; the echoed range is the
+ * second key, for an answer with no filter; position among what is still
+ * unplaced is the last resort. A request nothing answered gets an empty
+ * block in its place, so the caller can index by position and read the
+ * right cell every time. */
+export function placeByRequest(
+  requested: string[],
+  answers: MatchedValueRange[]
+): Array<MatchedValueRange | undefined> {
+  const placed: Array<MatchedValueRange | undefined> = new Array(requested.length).fill(undefined);
+  const used = new Set<number>();
+  const slotFor = (a1: unknown) => {
+    if (typeof a1 !== "string") return -1;
+    const key = a1Key(a1);
+    return requested.findIndex((req, j) => placed[j] === undefined && a1Key(req) === key);
+  };
+  const place = (i: number, slot: number) => {
+    if (slot === -1) return;
+    placed[slot] = answers[i];
+    used.add(i);
+  };
+  answers.forEach((a, i) => place(i, slotFor(a.dataFilters?.[0]?.a1Range)));
+  answers.forEach((a, i) => {
+    if (!used.has(i)) place(i, slotFor(a.valueRange?.range));
+  });
+  let cursor = 0;
+  answers.forEach((_, i) => {
+    if (used.has(i)) return;
+    while (cursor < requested.length && placed[cursor] !== undefined) cursor++;
+    if (cursor < requested.length) place(i, cursor);
+  });
+  return placed;
+}
+
 /** Several ranges in ONE request (SCRUM-246). The transport cannot carry an
  * array-valued query parameter, so values.batchGet (ranges=...) is out of
  * reach; values.batchGetByDataFilter takes the ranges in a JSON body and
- * answers with one value range per filter, in the order given. A range that
- * exists but is empty comes back as an empty block with its echoed range; a
- * tab that does not exist fails the whole call, which the missing-tab seam
- * then explains. */
+ * answers with one value range per filter. The answers are placed back in
+ * request order (SCRUM-253, see placeByRequest). A range that exists but is
+ * empty comes back as an empty block with its echoed range; a tab that does
+ * not exist fails the whole call, which the missing-tab seam then explains. */
 export async function readSheetRanges(
   client: GwsClient,
   spreadsheetId: unknown,
@@ -470,11 +525,9 @@ export async function readSheetRanges(
       ...(valueRenderOption ? { valueRenderOption } : {}),
     },
   });
-  const data = result.data as {
-    valueRanges?: Array<{ valueRange?: { range?: unknown; values?: string[][] } }>;
-  };
-  const blocks = (data.valueRanges ?? []).map((entry) =>
-    normalizeValueRange(entry.valueRange ?? {})
+  const data = result.data as { valueRanges?: MatchedValueRange[] };
+  const blocks = placeByRequest(a1, data.valueRanges ?? []).map((entry, j) =>
+    normalizeValueRange(entry?.valueRange ?? { range: a1[j] })
   );
   return { blocks };
 }

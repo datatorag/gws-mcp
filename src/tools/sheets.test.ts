@@ -753,3 +753,86 @@ describe("sheets_read with ranges[] (SCRUM-246)", () => {
     expect(read.description).not.toContain("\u2014");
   });
 });
+
+/* SCRUM-253: the blocks come back in the order the ranges were given, no
+ * matter how the API orders its answer. values.batchGetByDataFilter returns
+ * one matched value range per filter but does not promise the request order
+ * (values.batchGet does; it is out of reach, see SCRUM-246), and the first
+ * two real calls after 246 shipped proved it: three ranges of different
+ * sizes came back sorted by something other than the request. Each answer
+ * echoes the filter it matched, and that echo is what places the block. */
+describe("sheets_read ranges[] keeps the request order (SCRUM-253)", () => {
+  const REQUEST = ["Inventory!A1:A1", "Inventory!A150:A200", "Inventory!J1:J1"];
+
+  it("places three ranges of different sizes by the filter each answer echoes, not by arrival", async () => {
+    const { client } = fakeClient([
+      {
+        data: {
+          valueRanges: [
+            { dataFilters: [{ a1Range: "Inventory!A1:A1" }], valueRange: { range: "Inventory!A1", values: [["sku"]] } },
+            { dataFilters: [{ a1Range: "Inventory!J1:J1" }], valueRange: { range: "Inventory!J1", values: [["qty"]] } },
+            {
+              dataFilters: [{ a1Range: "Inventory!A150:A200" }],
+              valueRange: { range: "Inventory!A150:A200", values: [["r-1"], ["r-2"], ["r-3"]] },
+            },
+          ],
+        },
+      },
+    ]);
+    const result = payload(
+      await handleSheets(client, "sheets_read", { spreadsheet_id: "s", ranges: REQUEST })
+    );
+    expect(result.blocks.map((b: { range: string }) => b.range)).toEqual([
+      "Inventory!A1",
+      "Inventory!A150:A200",
+      "Inventory!J1",
+    ]);
+    expect(result.blocks[0].values).toEqual([["sku"]]);
+    expect(result.blocks[1].rowCount).toBe(3);
+    expect(result.blocks[2].values).toEqual([["qty"]]);
+  });
+
+  it("falls back to the echoed range when an answer carries no filter, and then to position", async () => {
+    const { client } = fakeClient([
+      {
+        data: {
+          valueRanges: [
+            { valueRange: { range: "Inventory!J1", values: [["qty"]] } },
+            { valueRange: { range: "Inventory!A1", values: [["sku"]] } },
+            { valueRange: { range: "Inventory!A150:A200", values: [["r-1"]] } },
+          ],
+        },
+      },
+    ]);
+    const result = payload(
+      await handleSheets(client, "sheets_read", { spreadsheet_id: "s", ranges: REQUEST })
+    );
+    // "Inventory!J1" is the API's spelling of "Inventory!J1:J1": a single cell
+    // echoes without the repeated corner, so the match is on the cells
+    // named, not the text.
+    expect(result.blocks.map((b: { range: string }) => b.range)).toEqual([
+      "Inventory!A1",
+      "Inventory!A150:A200",
+      "Inventory!J1",
+    ]);
+  });
+
+  it("gives a range the API did not answer an empty block in its place", async () => {
+    const { client } = fakeClient([
+      {
+        data: {
+          valueRanges: [
+            { dataFilters: [{ a1Range: "Inventory!J1:J1" }], valueRange: { range: "Inventory!J1", values: [["qty"]] } },
+            { dataFilters: [{ a1Range: "Inventory!A1:A1" }], valueRange: { range: "Inventory!A1", values: [["sku"]] } },
+          ],
+        },
+      },
+    ]);
+    const result = payload(
+      await handleSheets(client, "sheets_read", { spreadsheet_id: "s", ranges: REQUEST })
+    );
+    expect(result.blocks).toHaveLength(3);
+    expect(result.blocks[1]).toEqual({ range: "Inventory!A150:A200", rowCount: 0, columnCount: 0, values: [] });
+    expect(result.blocks[2].values).toEqual([["qty"]]);
+  });
+});
