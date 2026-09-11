@@ -79,3 +79,88 @@ describe("the Tasks surface deliberately has no delete-tasklist tool", () => {
     ]);
   });
 });
+
+/* SCRUM-250: many tasks in one call. A brief used to spend one model step
+ * per task; now the whole NEEDS YOU list is one call, with a per-task
+ * outcome so a partial batch is visible. The single-task shape stays. */
+describe("tasks_create with tasks[] (SCRUM-250)", () => {
+  const three = [
+    { title: "Reply to the vendor" },
+    { title: "Book the dentist", notes: "before Friday", due: "2026-09-15T00:00:00Z" },
+    { title: "Send the deck" },
+  ];
+
+  it("keeps the single-task shape: title alone still inserts one task", async () => {
+    const { client, calls } = fakeClient([{ data: { id: "T1", title: "One" } }]);
+    const result = await handleTasks(client, "tasks_create", { tasklist_id: "@default", title: "One" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ method: "insert", params: { tasklist: "@default" }, jsonBody: { title: "One" } });
+    expect(payload(result)).toEqual({ id: "T1", title: "One" });
+  });
+
+  it("N tasks in one call yield N inserts and N ids, in order", async () => {
+    const { client, calls } = fakeClient([
+      { data: { id: "T1", title: "Reply to the vendor" } },
+      { data: { id: "T2", title: "Book the dentist" } },
+      { data: { id: "T3", title: "Send the deck" } },
+    ]);
+    const result = await handleTasks(client, "tasks_create", { tasklist_id: "L1", tasks: three });
+    expect(calls).toHaveLength(3);
+    expect(calls.map((c) => (c.params as { tasklist: string }).tasklist)).toEqual(["L1", "L1", "L1"]);
+    expect(calls[1].jsonBody).toEqual({ title: "Book the dentist", notes: "before Friday", due: "2026-09-15T00:00:00Z" });
+    const out = payload(result);
+    expect(out.created).toBe(3);
+    expect(out.failed).toBe(0);
+    expect(out.results).toEqual([
+      { index: 0, title: "Reply to the vendor", ok: true, id: "T1" },
+      { index: 1, title: "Book the dentist", ok: true, id: "T2" },
+      { index: 2, title: "Send the deck", ok: true, id: "T3" },
+    ]);
+  });
+
+  it("one bad task reports its own error and the rest land", async () => {
+    const { client, calls } = fakeClient([
+      { data: { id: "T1" } },
+      { throws: "Invalid task list id" },
+      { data: { id: "T3" } },
+    ]);
+    const out = payload(await handleTasks(client, "tasks_create", { tasklist_id: "L1", tasks: three }));
+    expect(calls).toHaveLength(3);
+    expect(out.created).toBe(2);
+    expect(out.failed).toBe(1);
+    expect(out.results[1]).toEqual({ index: 1, title: "Book the dentist", ok: false, error: "Invalid task list id" });
+    expect(out.results[0]).toMatchObject({ ok: true, id: "T1" });
+    expect(out.results[2]).toMatchObject({ ok: true, id: "T3" });
+  });
+
+  it("a task may name its own list, else the shared one applies", async () => {
+    const { client, calls } = fakeClient([{ data: { id: "T1" } }, { data: { id: "T2" } }]);
+    await handleTasks(client, "tasks_create", {
+      tasklist_id: "L1",
+      tasks: [{ title: "a" }, { title: "b", tasklist_id: "L2" }],
+    });
+    expect(calls.map((c) => (c.params as { tasklist: string }).tasklist)).toEqual(["L1", "L2"]);
+  });
+
+  it("refuses both shapes at once, neither, an empty batch, and a task with no title, without calling the API", async () => {
+    const { client, calls } = fakeClient([]);
+    await expect(handleTasks(client, "tasks_create", { tasklist_id: "L1", title: "x", tasks: three })).rejects.toThrow(/either/i);
+    await expect(handleTasks(client, "tasks_create", { tasklist_id: "L1" })).rejects.toThrow(/either/i);
+    await expect(handleTasks(client, "tasks_create", { tasklist_id: "L1", tasks: [] })).rejects.toThrow(/at least one/i);
+    await expect(handleTasks(client, "tasks_create", { tasklist_id: "L1", tasks: [{ notes: "no title" }] })).rejects.toThrow(/title/i);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("the schema offers tasks[] beside the single fields, requires only the list, and its text carries no dash", () => {
+    const t = tool("tasks_create");
+    const props = t.inputSchema.properties as Record<string, { type?: string; items?: { properties?: Record<string, unknown>; required?: string[] } }>;
+    expect(props.tasks?.type).toBe("array");
+    expect(Object.keys(props.tasks?.items?.properties ?? {})).toEqual(expect.arrayContaining(["title", "notes", "due", "tasklist_id"]));
+    expect(props.tasks?.items?.required).toEqual(["title"]);
+    expect(props.title).toBeDefined();
+    expect(t.inputSchema.required).toEqual(["tasklist_id"]);
+    expect(t.description).toMatch(/one call/i);
+    expect(t.description).not.toContain("\u2014");
+    expect(JSON.stringify(t.inputSchema)).not.toContain("\u2014");
+  });
+});
