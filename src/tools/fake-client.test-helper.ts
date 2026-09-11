@@ -6,15 +6,16 @@ import type { GwsClient } from "../gws-client.js";
  * `method`, helper entries carry `command`), `plan` decides each call's
  * fate in order. */
 export function fakeClient(
-  plan: Array<{ data?: unknown; throws?: string }>
+  plan: Array<{ data?: unknown; throws?: string; text?: string; status?: number }>
 ): { client: GwsClient; calls: Array<Record<string, unknown>> } {
   const calls: Array<Record<string, unknown>> = [];
-  const next = () => {
-    const step = plan.shift();
-    if (!step) throw new Error("fake client: no planned response left");
-    if (step.throws) throw new Error(step.throws);
-    return { success: true, data: step.data };
+  const step = () => {
+    const s = plan.shift();
+    if (!s) throw new Error("fake client: no planned response left");
+    if (s.throws) throw new Error(s.throws);
+    return s;
   };
+  const next = () => ({ success: true, data: step().data });
   const api = vi.fn(async (service, resource, method, opts) => {
     calls.push({ service, resource, method, ...opts });
     return next();
@@ -23,7 +24,14 @@ export function fakeClient(
     calls.push({ service, command, flags, ...(opts ?? {}) });
     return next();
   });
-  return { client: { api, helper } as unknown as GwsClient, calls };
+  // fetchText entries carry `url`; the plan step answers with `text` and an
+  // optional `status` (200 when unset).
+  const fetchText = vi.fn(async (url: string) => {
+    calls.push({ url });
+    const s = step();
+    return { status: s.status ?? 200, text: s.text ?? "" };
+  });
+  return { client: { api, helper, fetchText } as unknown as GwsClient, calls };
 }
 
 /** The JSON body a handler wrapped in its MCP response envelope. */

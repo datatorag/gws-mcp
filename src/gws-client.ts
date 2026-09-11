@@ -225,6 +225,12 @@ function errorDetail(error: {
   return `gws exited with code ${error.code ?? "unknown"} and produced no diagnostic output`;
 }
 
+/** The only origins fetchText will carry the access token to. */
+const ALLOWED_FETCH_ORIGINS: ReadonlySet<string> = new Set([
+  "https://docs.google.com",
+  "https://www.googleapis.com",
+]);
+
 export class GwsClient {
   private mergedEnv: NodeJS.ProcessEnv;
   private defaultAccessToken?: string;
@@ -249,6 +255,31 @@ export class GwsClient {
    * re-construction gives the same client without prototype surgery. */
   withToken(accessToken: string): GwsClient {
     return new GwsClient({ accessToken });
+  }
+
+  /** A plain authenticated GET, for the one Google surface the CLI cannot
+   * reach: the Visualization query endpoint behind sheets_query (SCRUM-261)
+   * is not a discovery-based API, so it is fetched directly with the same
+   * access token the CLI calls carry. Text in, text out; the caller parses.
+   * Refuses without a token rather than sending an anonymous request that
+   * would answer with a login page for any private file. */
+  async fetchText(url: string, options?: { timeout?: number }): Promise<{ status: number; text: string }> {
+    const token = this.defaultAccessToken;
+    if (!token) {
+      throw new Error("This call needs an access token; connect the account through the gateway and try again.");
+    }
+    // The token goes only to Google. A general authenticated GET would be a
+    // token-exfiltration primitive the moment a caller built its URL from
+    // user input, so the origin is pinned here, not left to each caller.
+    if (!ALLOWED_FETCH_ORIGINS.has(new URL(url).origin)) {
+      throw new Error("fetchText only reaches Google origins.");
+    }
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(options?.timeout ?? 30_000),
+      redirect: "manual",
+    });
+    return { status: res.status, text: await res.text() };
   }
 
   /** Clear stored credentials so the next login gets a fresh token. */

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { GwsClient, TransientGwsError, isTransient } from "./gws-client.js";
 
 /** Drives the real `api()` with `exec` swapped out, so the argument assembly
@@ -99,5 +99,45 @@ describe("transient upstream failures are marked retryable", () => {
     // The expensive direction to get wrong: a permanent failure marked
     // retryable sends a caller into a loop against a wall.
     expect(isTransient(message)).toBe(false);
+  });
+});
+
+/* SCRUM-261: the one plain authenticated GET, pinned to Google. The token
+ * goes only where the CLI would have taken it; a caller cannot point it
+ * elsewhere, and there is no anonymous fallback. */
+describe("fetchText carries the token only to Google (SCRUM-261)", () => {
+  const seen: Array<{ url: string; auth: string | undefined }> = [];
+  const realFetch = globalThis.fetch;
+  beforeEach(() => {
+    seen.length = 0;
+    globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
+      const headers = init?.headers as Record<string, string> | undefined;
+      seen.push({ url: String(url), auth: headers?.Authorization });
+      return new Response("/*O_o*/\ngoogle.visualization.Query.setResponse({});", { status: 200 });
+    }) as typeof fetch;
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  it("refuses without a token, before any request", async () => {
+    const anonymous = new GwsClient();
+    await expect(anonymous.fetchText("https://docs.google.com/spreadsheets/d/s/gviz/tq")).rejects.toThrow(/needs an access token/);
+    expect(seen).toHaveLength(0);
+  });
+
+  it("refuses a non-Google origin, before any request", async () => {
+    const client = new GwsClient({ accessToken: "tok" });
+    await expect(client.fetchText("https://example.com/collect?x=1")).rejects.toThrow(/only reaches Google origins/);
+    await expect(client.fetchText("http://docs.google.com/spreadsheets/d/s/gviz/tq")).rejects.toThrow(/only reaches Google origins/);
+    expect(seen).toHaveLength(0);
+  });
+
+  it("sends the bearer to a Google origin and hands back status and text", async () => {
+    const client = new GwsClient({ accessToken: "tok" });
+    const out = await client.fetchText("https://docs.google.com/spreadsheets/d/s/gviz/tq?tq=select%20A");
+    expect(seen).toEqual([{ url: "https://docs.google.com/spreadsheets/d/s/gviz/tq?tq=select%20A", auth: "Bearer tok" }]);
+    expect(out.status).toBe(200);
+    expect(out.text).toContain("setResponse");
   });
 });
