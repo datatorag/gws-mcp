@@ -626,10 +626,11 @@ async function fetchMessageList(
   const details = await Promise.all(
     messages.map((m) =>
       client.api("gmail", "users.messages", "get", {
-        // NOTE: no metadataHeaders filter — the gws CLI can only serialize
-        // scalar query params, and a comma-joined value matches no header
-        // name, silently returning zero headers. Plain metadata format
-        // returns all headers; we flatten to the few we need below.
+        // NOTE: no metadataHeaders filter. A comma-joined value matches no
+        // header name and silently returns zero headers; an array would be
+        // sent as a repeated key by the pinned gws CLI (SCRUM-178), but plain
+        // metadata format already returns every header, and we flatten to
+        // the few we need below, so there is nothing to gain by filtering.
         params: {
           userId: "me",
           id: m.id,

@@ -134,32 +134,44 @@ function throwGwsError(message: string): never {
 }
 
 /**
- * Reject array-valued query parameters, which this transport cannot carry.
+ * Refuse the one query-parameter shape this transport cannot carry: an array
+ * whose elements are not scalars.
  *
- * Params reach the binary as one `--params` JSON blob, and it flattens each
- * value to a single query string: `ranges: ["A!A1", "A!A9"]` goes out as the
- * literal `ranges=["A!A1","A!A9"]`. Google answers `Unable to parse range`
- * with the JSON array printed back — an error about the caller's RANGES,
- * which are fine, rather than about the encoding, which is not. The same
- * flattening silently returned zero headers for `metadataHeaders` until the
- * comment at gmail.ts:525 pinned it down.
+ * Params reach the binary as one `--params` JSON blob. The vendored gws CLI
+ * (0.17.0, pinned by download-binaries.sh) turns an array of scalars into a
+ * REPEATED query key, which is what the Google APIs expect for `ranges`,
+ * `metadataHeaders`, `labelIds` and every other parameter their discovery
+ * document marks `repeated`: `ranges: ["A!A1", "A!A9"]` goes out as
+ * `ranges=A!A1&ranges=A!A9`. Measured with `--dry-run` on the pinned binary,
+ * and pinned by the transport test beside this file, because an earlier
+ * version of this guard asserted the opposite from memory and blocked every
+ * such call for months (SCRUM-178).
  *
- * Nothing here can fix it: URL construction happens inside the binary. So
- * fail before the call with the reason, rather than after it with a message
- * that sends the caller to rewrite correct A1 notation. Repeated-parameter
- * support belongs in the gws binary; until then, callers should issue one
- * request per value.
+ * What the binary still cannot express is an element that is itself an
+ * array or an object: it stringifies the element into one query value and
+ * Google reads JSON where it wanted a range or a header name. That failure
+ * would come back blaming the caller's input, which was fine, so it is
+ * refused here, before the call, with the shape named.
+ *
+ * A scalar array on a parameter the API does NOT mark repeated is left to
+ * the binary: it prints a warning on stderr and sends the stringified value,
+ * and when Google rejects that, `errorDetail` surfaces the warning first.
  */
-function assertScalarParams(params: Record<string, unknown>): void {
-  const arrays = Object.entries(params)
-    .filter(([, value]) => Array.isArray(value))
+function assertCarriableParams(params: Record<string, unknown>): void {
+  const nested = Object.entries(params)
+    .filter(
+      ([, value]) =>
+        Array.isArray(value) &&
+        value.some((element) => element === null || typeof element === "object")
+    )
     .map(([key]) => key);
-  if (arrays.length === 0) return;
+  if (nested.length === 0) return;
   throw new Error(
-    `Array-valued parameters are not supported by the gws CLI transport: ` +
-      `${arrays.map((k) => `"${k}"`).join(", ")}. ` +
-      `The binary serialises them into a single query value (ranges=["A1","A2"]), ` +
-      `which the API rejects as a malformed range. Issue one call per value instead.`
+    `Array parameters must hold only strings, numbers or booleans; ` +
+      `${nested.map((k) => `"${k}"`).join(", ")} ` +
+      `${nested.length === 1 ? "holds" : "hold"} nested arrays or objects, ` +
+      `which the gws CLI transport sends as one literal JSON value the API cannot read. ` +
+      `Pass one scalar per element; a repeated query parameter takes ["A", "B"].`
   );
 }
 
@@ -429,7 +441,7 @@ export class GwsClient {
     const args = [service, ...resource.split("."), method];
 
     if (options?.params) {
-      assertScalarParams(options.params);
+      assertCarriableParams(options.params);
       args.push("--params", JSON.stringify(options.params));
     }
     if (options?.jsonBody) {

@@ -15,41 +15,60 @@ function clientWithExec(
   return { client, argv };
 }
 
-describe("array-valued params (SCRUM-121)", () => {
-  it("rejects them before the call, naming the offending keys", async () => {
+/** The `--params` JSON the client handed to the binary. */
+function paramsSentIn(argv: string[]): Record<string, unknown> {
+  const at = argv.indexOf("--params");
+  expect(at).toBeGreaterThan(-1);
+  return JSON.parse(argv[at + 1]) as Record<string, unknown>;
+}
+
+/* SCRUM-178. The transport used to refuse every array before the call,
+ * on the belief that the binary flattened it into one query value. The
+ * pinned binary sends a repeated key; the belief cost every batchGet,
+ * metadataHeaders and labelIds call for months. These pin the argv half:
+ * the array reaches the binary intact. The other half, what the binary
+ * does with it, is pinned against the real binary in
+ * gws-cli-transport.test.ts. */
+describe("repeated query parameters reach the binary as arrays (SCRUM-178)", () => {
+  it.each([
+    ["sheets", "spreadsheets", "get", { spreadsheetId: "s", ranges: ["A!A1:B2", "A!A9:B10"] }, "ranges"],
+    ["gmail", "users.messages", "get", { userId: "me", id: "m", format: "metadata", metadataHeaders: ["From", "Subject"] }, "metadataHeaders"],
+    ["gmail", "users.messages", "list", { userId: "me", labelIds: ["INBOX", "UNREAD"] }, "labelIds"],
+  ])("%s %s %s carries the array unchanged", async (service, resource, method, params, key) => {
     const { client, argv } = clientWithExec(async () => ({ success: true, data: {} }));
+    await client.api(service, resource, method, { params });
 
-    await expect(
-      client.api("sheets", "spreadsheets.values", "batchGet", {
-        params: { spreadsheetId: "s", ranges: ["A!A1:B2", "A!A9:B10"] },
-      })
-    ).rejects.toThrow(/"ranges"/);
-
-    // Failing BEFORE the request is the point: the old behaviour reached
-    // Google and came back blaming the caller's A1 notation, which was fine.
-    expect(argv).toHaveLength(0);
+    expect(argv).toHaveLength(1);
+    expect(paramsSentIn(argv[0])[key]).toEqual(params[key as keyof typeof params]);
   });
 
-  it("explains the encoding rather than the range", async () => {
-    const { client } = clientWithExec(async () => ({ success: true, data: {} }));
+  it("refuses an array of non-scalars before the call, naming the key and the shape", async () => {
+    const { client, argv } = clientWithExec(async () => ({ success: true, data: {} }));
     const err = await client
-      .api("sheets", "spreadsheets.values", "batchGet", {
-        params: { ranges: ["A1", "A2"] },
+      .api("sheets", "spreadsheets", "get", {
+        params: { spreadsheetId: "s", ranges: [{ sheet: "A", range: "A1" }] },
       })
       .catch((e: Error) => e);
 
-    expect((err as Error).message).toMatch(/one call per value/i);
+    // Failing BEFORE the request is still the point for this shape: the
+    // binary would stringify the object and Google would blame the range.
+    expect(argv).toHaveLength(0);
+    expect((err as Error).message).toContain('"ranges"');
+    expect((err as Error).message).toMatch(/nested arrays or objects/);
     expect((err as Error).message).not.toMatch(/unable to parse range/i);
   });
 
-  it("names every array param, not only the first", async () => {
+  it("names every offending key, and only the offending ones", async () => {
     const { client } = clientWithExec(async () => ({ success: true, data: {} }));
     const err = await client
-      .api("drive", "files", "list", { params: { ids: ["a"], parents: ["b"] } })
+      .api("drive", "files", "list", {
+        params: { ids: [["a"]], parents: [null], fields: ["id", "name"] },
+      })
       .catch((e: Error) => e);
 
     expect((err as Error).message).toContain('"ids"');
     expect((err as Error).message).toContain('"parents"');
+    expect((err as Error).message).not.toContain('"fields"');
   });
 
   it("leaves scalar params alone", async () => {
