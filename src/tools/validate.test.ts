@@ -119,6 +119,96 @@ describe("validateArgs", () => {
     expect(message).toContain('"size"');
   });
 
+  describe("SCRUM-269: a JSON string holding the declared array or object is unwrapped", () => {
+    it("accepts a JSON-encoded 2D array for an array parameter and leaves the array in args", () => {
+      const args: Record<string, unknown> = {
+        spreadsheet_id: "s",
+        range: "A1",
+        values: '[["a","b"],[1,2]]',
+      };
+      expect(() => validateArgs(tool("sheets_update"), args)).not.toThrow();
+      // The handler reads this same object, so this is what it sees.
+      expect(args.values).toEqual([
+        ["a", "b"],
+        [1, 2],
+      ]);
+    });
+
+    it("accepts a JSON-encoded object for an object parameter", () => {
+      const args: Record<string, unknown> = {
+        service: "drive",
+        resource: "files",
+        method: "list",
+        params: '{"pageSize":10,"q":"name contains \'x\'"}',
+      };
+      expect(() => validateArgs(tool("gws_run"), args)).not.toThrow();
+      expect(args.params).toEqual({ pageSize: 10, q: "name contains 'x'" });
+    });
+
+    it("accepts \"[]\" for an array parameter", () => {
+      const args: Record<string, unknown> = { spreadsheet_id: "s", range: "A1", values: "[]" };
+      expect(() => validateArgs(tool("sheets_update"), args)).not.toThrow();
+      expect(args.values).toEqual([]);
+    });
+
+    it("still rejects a JSON-encoded object for an array parameter, with the existing message", () => {
+      const args: Record<string, unknown> = {
+        spreadsheet_id: "s",
+        range: "A1",
+        values: '{"a":1}',
+      };
+      const message = failure("sheets_update", args);
+      expect(message).toBe(
+        'sheets_update: parameter "values" must be an array, received a string ("{\\"a\\":1}").'
+      );
+      expect(args.values).toBe('{"a":1}');
+    });
+
+    it("still rejects a JSON-encoded array for an object parameter", () => {
+      const message = failure("gws_run", {
+        service: "drive",
+        resource: "files",
+        method: "list",
+        params: "[1]",
+      });
+      expect(message).toContain('parameter "params" must be an object, received a string');
+    });
+
+    it("still rejects JSON null for an object parameter", () => {
+      const message = failure("gws_run", {
+        service: "drive",
+        resource: "files",
+        method: "list",
+        params: "null",
+      });
+      expect(message).toContain('parameter "params" must be an object, received a string');
+    });
+
+    it("still rejects a string that is not JSON for an array parameter, with the existing message", () => {
+      const message = failure("sheets_update", {
+        spreadsheet_id: "s",
+        range: "A1",
+        values: "[[a, b]",
+      });
+      expect(message).toBe(
+        'sheets_update: parameter "values" must be an array, received a string ("[[a, b]").'
+      );
+    });
+
+    it("leaves a string parameter holding \"[1]\" as a string", () => {
+      const args: Record<string, unknown> = { query: "[1]" };
+      expect(() => validateArgs(tool("drive_search"), args)).not.toThrow();
+      expect(args.query).toBe("[1]");
+    });
+
+    it("still rejects a number parameter holding \"3\"", () => {
+      const args: Record<string, unknown> = { query: "q", page_size: "3" };
+      const message = failure("drive_search", args);
+      expect(message).toContain('parameter "page_size" must be a number, received a string ("3")');
+      expect(args.page_size).toBe("3");
+    });
+  });
+
   it("covers every registered tool without crashing on its schema", () => {
     // Cheap guard against a tool whose schema shape this validator cannot
     // read: a new tool is far likelier to arrive than this file is to be

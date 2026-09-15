@@ -15,8 +15,11 @@ import type { ToolDef } from "./annotations.js";
  *
  * Both failures share one cause and get one fix, here, rather than sixty
  * hand-written guards that drift. The rule for what belongs in this file: it
- * validates what the schema already claims, and nothing else. Anything needing
- * knowledge of the API beyond the schema stays in the handler.
+ * validates what the schema already claims, and nothing else. It also unwraps a
+ * JSON string that decodes to the declared array or object type, because a
+ * client's transport can double-encode a value that was otherwise correct, and
+ * losing the call over the envelope helps nobody. Anything needing knowledge of
+ * the API beyond the schema stays in the handler.
  */
 
 /** JSON-schema `type` names we check. Anything else is accepted unchecked
@@ -37,8 +40,26 @@ function describe(value: unknown): string {
 }
 
 /**
+ * The value a double-encoded string stands for, when it decodes to exactly
+ * the declared container type (per SCRUM-269); `undefined` otherwise. Only
+ * arrays and objects: a number or boolean sent as a string is a deliberate
+ * rejection, and coercing it would change what the value means.
+ */
+function unwrapJsonString(value: string, expected: "array" | "object"): unknown {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return undefined;
+  }
+  return typeOf(parsed) === expected ? parsed : undefined;
+}
+
+/**
  * Throws with a caller-facing message when `args` does not satisfy `tool`.
- * Returns silently otherwise.
+ * Returns silently otherwise. Mutates `args` in place when it unwraps a
+ * JSON-encoded array or object, so the handler reading the same object sees
+ * the decoded value.
  */
 export function validateArgs(tool: ToolDef, args: Record<string, unknown>): void {
   const properties = tool.inputSchema.properties as Record<
@@ -74,13 +95,23 @@ export function validateArgs(tool: ToolDef, args: Record<string, unknown>): void
 
   // 3. Types and enums, for the arguments that are present. Absent optional
   //    arguments are not an error — that is what optional means.
-  for (const [key, value] of Object.entries(args)) {
+  for (const [key, original] of Object.entries(args)) {
+    let value = original;
     if (value === undefined) continue;
     const spec = properties[key];
     if (!spec) continue;
 
     const expected = spec.type as CheckedType | undefined;
     if (expected && ["string", "number", "boolean", "array", "object"].includes(expected)) {
+      // A JSON string holding exactly the declared array or object is the
+      // right value in the wrong envelope: unwrap it and validate what it held.
+      if ((expected === "array" || expected === "object") && typeof value === "string") {
+        const unwrapped = unwrapJsonString(value, expected);
+        if (unwrapped !== undefined) {
+          args[key] = unwrapped;
+          value = unwrapped;
+        }
+      }
       const seen = typeOf(value);
       // JSON has one number type; an integer is a number and both are fine.
       const ok = expected === "object" ? seen === "object" : seen === expected;
