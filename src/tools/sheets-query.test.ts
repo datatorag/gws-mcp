@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { fakeClient, payload } from "./fake-client.test-helper.js";
-import { buildQueryUrl, handleSheetsQuery, parseGvizBody, sheetsQueryTools } from "./sheets-query.js";
+import { buildQueryUrl, handleSheetsQuery, parseGvizBody, rewriteColumnNames, sheetsQueryTools } from "./sheets-query.js";
 import { READ } from "./annotations.js";
 import { allTools, toolHandlers } from "./index.js";
 
@@ -149,5 +149,85 @@ describe("sheets_query (SCRUM-261)", () => {
     await expect(handleSheetsQuery(blank.client, "sheets_query", { spreadsheet_id: "s", query: "   " })).rejects.toThrow(
       /query must not be blank/
     );
+  });
+});
+
+/* SCRUM-268: Col1, Col2 is QUERY()'s array column form, which the endpoint
+ * does not know. The tool maps it onto the range's columns before sending,
+ * and a NO_COLUMN error names the column exactly as the endpoint gave it. */
+
+const OK = { text: wrap({ status: "ok", table: { cols: [{ id: "B", label: "Task", type: "string" }], rows: [] } }) };
+const noColumn = (name: string) => ({
+  text: wrap({
+    status: "error",
+    errors: [{ reason: "invalid_query", message: "INVALID_QUERY", detailed_message: `Invalid query: NO_COLUMN: ${name}` }],
+  }),
+});
+
+describe("sheets_query Col1-style names (SCRUM-268)", () => {
+  it("maps Col<n> to the sheet letter counted from the range's first column, sends it, and echoes it", async () => {
+    const { client, calls } = fakeClient([OK]);
+    const result = payload(
+      await handleSheetsQuery(client, "sheets_query", {
+        spreadsheet_id: "s",
+        range: "Tab!B1:F9",
+        query: "select Col1, Col3 where Col2 = 'x'",
+      })
+    );
+    const url = new URL(calls[0].url as string);
+    expect(url.searchParams.get("tq")).toBe("select B, D where C = 'x'");
+    expect(url.searchParams.get("range")).toBe("B1:F9");
+    expect(result.query).toBe("select B, D where C = 'x'");
+  });
+
+  it("leaves Col1 inside a string literal alone, in either quote", () => {
+    expect(rewriteColumnNames("select Col1 where Col2 = 'Col1' or Col2 = \"col3\"", "Tab!C1:F9")).toBe(
+      "select C where D = 'Col1' or D = \"col3\""
+    );
+  });
+
+  it("with no range block Col1 is A, and lower case maps too", () => {
+    expect(rewriteColumnNames("select col2, COL1", undefined)).toBe("select B, A");
+    expect(rewriteColumnNames("select Col1", "Tasks")).toBe("select A");
+    expect(rewriteColumnNames("select Col27 label Col1 'n'", "Tasks")).toBe("select AA label A 'n'");
+    // A column past Z counts on from a two-letter start, and a row-only block starts at A.
+    expect(rewriteColumnNames("select Col2", "Tab!AZ1:BC9")).toBe("select BA");
+    expect(rewriteColumnNames("select Col3", "Tab!2:9")).toBe("select C");
+  });
+
+  it("does not touch what is not a whole Col<n> word, so a query that works today is sent unchanged", () => {
+    const q = "select A, B where Column1 = 1 and xCol1 = 2 and Col1_a = 3 and C > 0";
+    expect(rewriteColumnNames(q, "Tab!A1:F9")).toBe(q);
+    expect(new URL(buildQueryUrl("s", "select A", "Tab!A1:F9", true)).searchParams.get("tq")).toBe("select A");
+  });
+
+  it("refuses a Col<n> past the range's last column before any request, naming the column it would be", async () => {
+    const { client, calls } = fakeClient([]);
+    await expect(
+      handleSheetsQuery(client, "sheets_query", { spreadsheet_id: "s", range: "A1:F500", query: "select Col9" })
+    ).rejects.toThrow(/Col9 would be column I, past the last column F of the range A1:F500/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("refuses Col0, naming the range's first column", async () => {
+    const { client, calls } = fakeClient([]);
+    await expect(
+      handleSheetsQuery(client, "sheets_query", { spreadsheet_id: "s", range: "Tab!C1:F9", query: "select Col0" })
+    ).rejects.toThrow(/Col0 names no column; Col1 is the first column of the range, C/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("a real letter outside the range keeps the existing message", async () => {
+    const { client } = fakeClient([noColumn("Z")]);
+    await expect(
+      handleSheetsQuery(client, "sheets_query", { spreadsheet_id: "s", range: "A1:F500", query: "select Z" })
+    ).rejects.toThrow(/column Z, which is outside the range A1:F500/);
+  });
+
+  it("a NO_COLUMN name with digits or underscores is named whole, as a bad id rather than a range problem", async () => {
+    const { client } = fakeClient([noColumn("Status_2")]);
+    const err = handleSheetsQuery(client, "sheets_query", { spreadsheet_id: "s", range: "A1:F500", query: "select Status_2" });
+    await expect(err).rejects.toThrow(/names column Status_2, which is not a column id/);
+    await expect(err).rejects.not.toThrow(/outside the range/);
   });
 });

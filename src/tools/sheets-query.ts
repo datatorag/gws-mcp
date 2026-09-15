@@ -17,6 +17,12 @@ import { jsonResponse } from "./response.js";
  * Columns are addressed by letter, as in a QUERY() cell, and the letter is
  * the sheet's column, not the range's: "select A, D where I = 'open'"
  * means the sheet's A, D and I even when the range starts at C.
+ *
+ * Col1, Col2 (SCRUM-268) is QUERY()'s column form for array inputs, and the
+ * endpoint only knows letters, so it answers NO_COLUMN for it. Such a name
+ * can never be a valid id there, so the tool rewrites it before sending: the
+ * n-th column of the range, counted from the range's first column (Col1 on
+ * Tab!C1:F500 is C; with no cell block, Col1 is A).
  */
 
 const GVIZ_HOST = "https://docs.google.com";
@@ -25,7 +31,7 @@ export const sheetsQueryTools: ToolDef[] = [
   {
     name: "sheets_query",
     description:
-      "Run a query in the Google Sheets QUERY() language over a spreadsheet range and get back only the matching rows, in ONE call. Use this instead of reading a whole tab and filtering the values yourself: select A, D where I = 'open' order by A desc limit 20 returns the twenty rows you wanted and nothing else. The language supports select, where, group by, pivot, order by, limit, offset, label and format, with count, sum, avg, min and max. Columns are addressed by their SHEET letter (A, B, C), the same letter the column has in the tab, not its position inside the range. Text values are compared with quotes: where B = 'high' or where B contains 'urgent'. Read-only: nothing in the spreadsheet changes. The result carries the header the query produced, the rows, the row count and the echoed query; an empty match is an empty rows array.",
+      "Run a query in the Google Sheets QUERY() language over a spreadsheet range and get back only the matching rows, in ONE call. Use this instead of reading a whole tab and filtering the values yourself: select A, D where I = 'open' order by A desc limit 20 returns the twenty rows you wanted and nothing else. The language supports select, where, group by, pivot, order by, limit, offset, label and format, with count, sum, avg, min and max. Columns are addressed by their SHEET letter (A, B, C), the same letter the column has in the tab, not its position inside the range; Col1-style names are also accepted and mapped to the range's columns in order (on Tab!C1:F500, Col1 is C). Text values are compared with quotes: where B = 'high' or where B contains 'urgent'. Read-only: nothing in the spreadsheet changes. The result carries the header the query produced, the rows, the row count and the echoed query; an empty match is an empty rows array.",
     inputSchema: {
       type: "object",
       properties: {
@@ -79,6 +85,66 @@ function splitRange(range: string | undefined): { sheet?: string; block?: string
   return { sheet, ...(block ? { block } : {}) };
 }
 
+const letterToIndex = (letters: string) =>
+  [...letters.toUpperCase()].reduce((n, ch) => n * 26 + (ch.charCodeAt(0) - 64), 0);
+
+function indexToLetter(index: number): string {
+  let s = "";
+  for (let n = index; n > 0; n = Math.floor((n - 1) / 26)) s = String.fromCharCode(65 + ((n - 1) % 26)) + s;
+  return s;
+}
+
+/** The first and (when the block bounds it) last column of a cell block, as
+ * 1-based indexes. No block is the whole tab: first column A, no last. A
+ * block that is not A1 notation yields nothing. */
+function blockColumns(block: string | undefined): { first: number; last?: number } | undefined {
+  if (!block) return { first: 1 };
+  const m = /^([A-Za-z]{0,3})[0-9]*(?::([A-Za-z]{0,3})[0-9]*)?$/.exec(block.trim());
+  if (!m) return undefined;
+  const first = m[1] ? letterToIndex(m[1]) : 1;
+  const hasEnd = block.includes(":");
+  const last = hasEnd ? (m[2] ? letterToIndex(m[2]) : undefined) : m[1] ? first : undefined;
+  return { first, ...(last !== undefined ? { last } : {}) };
+}
+
+/** Rewrites each Col<n> (any case, a whole word, outside quoted strings) to
+ * the sheet letter of the range's n-th column. Throws before any request for
+ * Col0, a column past the range's end, or a block it cannot count. Exported
+ * for the tests. */
+export function rewriteColumnNames(query: string, range: string | undefined): string {
+  // Odd parts are string literals, which are left exactly as written.
+  const parts = query.split(/('[^']*'|"[^"]*")/);
+  const colName = /\bcol(\d+)\b/gi;
+  const { block } = splitRange(range);
+  const cols = blockColumns(block);
+  return parts
+    .map((part, i) =>
+      i % 2 === 1
+        ? part
+        : part.replace(colName, (name: string, digits: string) => {
+            if (!cols) {
+              throw new Error(
+                `sheets_query: cannot map ${name} onto the range ${range}; name the column by its sheet letter instead.`
+              );
+            }
+            const n = Number(digits);
+            if (n < 1) {
+              throw new Error(
+                `sheets_query: ${name} names no column; Col1 is the first column of the range, ${indexToLetter(cols.first)}.`
+              );
+            }
+            const target = cols.first + n - 1;
+            if (cols.last !== undefined && target > cols.last) {
+              throw new Error(
+                `sheets_query: ${name} would be column ${indexToLetter(target)}, past the last column ${indexToLetter(cols.last)} of the range ${range}.`
+              );
+            }
+            return indexToLetter(target);
+          })
+    )
+    .join("");
+}
+
 /** The tq endpoint URL for one query. Exported for the tests, which pin
  * the parameters because a wrong one fails silently as an empty table. */
 export function buildQueryUrl(spreadsheetId: string, query: string, range: string | undefined, hasHeader: boolean): string {
@@ -113,14 +179,15 @@ function cellValue(cell: GvizCell, type: string | undefined): unknown {
   return cell.v;
 }
 
-const NO_COLUMN = /NO_COLUMN:\s*([A-Za-z]+)/;
+const NO_COLUMN = /NO_COLUMN:\s*([A-Za-z0-9_]+)/;
 
 export async function runSheetsQuery(client: GwsClient, args: Record<string, unknown>) {
   const spreadsheetId = args.spreadsheet_id as string;
-  const query = typeof args.query === "string" ? args.query.trim() : "";
-  if (query === "") throw new Error("sheets_query: query must not be blank.");
+  const asWritten = typeof args.query === "string" ? args.query.trim() : "";
+  if (asWritten === "") throw new Error("sheets_query: query must not be blank.");
   const range = typeof args.range === "string" ? args.range : undefined;
   const hasHeader = args.has_header_row !== false;
+  const query = rewriteColumnNames(asWritten, range);
 
   const url = buildQueryUrl(spreadsheetId, query, range, hasHeader);
   const { status, text } = await client.fetchText(url);
@@ -138,6 +205,11 @@ export async function runSheetsQuery(client: GwsClient, args: Record<string, unk
     const first = body.errors?.[0];
     const detail = first?.detailed_message ?? first?.message ?? "the query was rejected";
     const missing = NO_COLUMN.exec(detail)?.[1];
+    if (missing && !/^[A-Za-z]{1,3}$/.test(missing)) {
+      throw new Error(
+        `sheets_query: the query names column ${missing}, which is not a column id. Columns are sheet letters (A, B, C) or Col1-style positions in the range.`
+      );
+    }
     if (missing) {
       throw new Error(
         `sheets_query: the query names column ${missing}, which is outside the range${range ? ` ${range}` : ""}. Columns are sheet letters; check the range covers ${missing}.`
