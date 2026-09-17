@@ -23,13 +23,17 @@ This server powers the Google Workspace connector of [DataToRAG](https://datator
 
 ### Key tool details
 
-**gmail_create_draft / gmail_update_draft** — Create or replace a Gmail draft. Constructs RFC 2822 MIME messages from structured parameters (to, subject, body, cc, bcc) and base64url-encodes them. `gmail_update_draft` preserves threading automatically — if no `thread_id` is provided, it fetches the existing draft's thread ID before replacing the message.
+**gmail_send / gmail_reply / gmail_forward / gmail_send_draft** — The account's Gmail signature is appended when the mail is SENT, so a model composing a message should not write a sign-off of its own. The signature comes from `users.settings.sendAs`, the `isDefault` entry (or the entry matching a draft's `From`), read fresh on every send and never cached — a client is built per tool call with that caller's token, so a remembered value would go out on someone else's mail. Gmail's API exposes only the new-email signature, so replies and forwards use it too. Pass `signature: false` to send without it and skip the lookup. Every response carries a `signature` field: `applied`, `none_set`, `suppressed`, `already_present`, `unavailable` or `skipped_unsupported_draft`. A failed lookup never blocks the send.
+
+The signature goes in the message's **HTML part only**, as the stored markup unchanged — so an image signature is simply a hosted URL that passes through, and nothing can mangle it. The plain-text part is built from the body alone and never carries it. A plain `body` send is therefore promoted to multipart/alternative when the account has a signature, with the plain half exactly as the caller wrote it; with no signature a plain send is byte-identical to before. The accepted cost is that a text-only reader sees the message without the signature.
+
+**gmail_create_draft / gmail_update_draft** — Create or replace a Gmail draft. Constructs RFC 2822 MIME messages from structured parameters (to, subject, body, cc, bcc) and base64url-encodes them. `gmail_update_draft` preserves threading automatically — if no `thread_id` is provided, it fetches the existing draft's thread ID before replacing the message. Neither adds a signature; that happens at send time.
 
 **gmail_read** — Full MIME payload by default. Pass `text_only: true` for a compact view (flattened from/to/cc/subject/date, decoded text body with HTML fallback, attachment metadata) that avoids base64 payloads overflowing the response — typically ~2% of the full size. `max_body_chars` truncates the body with a marker (implies `text_only`).
 
 **gmail_search / gmail_list** — Results are flattened to `{id, threadId, from, to, subject, date, snippet, labelIds}` per message instead of the raw metadata payload.
 
-**gmail_send_draft / gmail_delete_draft** — Send or permanently delete an existing draft by its draft ID. `gmail_send_draft` sends a reviewed draft as-is and removes it from Drafts (no orphaned draft left behind), completing the create → review → send loop. `gmail_delete_draft` deletes immediately (does not move to Trash).
+**gmail_send_draft / gmail_delete_draft** — Send or permanently delete an existing draft by its draft ID. `gmail_send_draft` sends a reviewed draft and removes it from Drafts (no orphaned draft left behind), completing the create → review → send loop. It rewrites the stored MIME to insert the signature into the HTML part, keeping every header and the plain part untouched, and inserting above a quoted reply; a `text/plain`-only draft gains an HTML part the same way a plain send does. A draft it will not rewrite is sent exactly as written and reports `skipped_unsupported_draft`: an attachment, an inline image, a nested multipart, an encoding it cannot re-emit, a part declaring a charset other than UTF-8 or US-ASCII, or a message whose bytes are not valid UTF-8 (both would be mangled by the rewrite). Nothing in the signature path can cost you the send — a failed read, a rewrite Gmail rejects and a rewrite too large to transmit all fall through to sending the draft untouched. When the signature does not fit the encoding the HTML part declares (an emoji in a `7bit` part, or an over-long line), that part is re-encoded as base64 rather than shipped as invalid MIME. `gmail_delete_draft` deletes immediately (does not move to Trash).
 
 **gmail_mark_read** — Marks messages as read by removing the UNREAD label. Also supports adding/removing arbitrary labels (STARRED, IMPORTANT, etc.) via `add_labels` and `remove_labels` arrays. Pass `message_id` for a single message, or `message_ids` (up to 1000) to modify a batch in one API call via `users.messages.batchModify`. Removes UNREAD by default when no label arrays are given.
 
@@ -223,6 +227,8 @@ src/
     ├── response.ts       # Response helpers (JSON formatting, 900KB truncation)
     ├── auth.ts           # OAuth login (browser-based, no gcloud needed)
     ├── gmail.ts          # Gmail tools (drafts, mark read, attachments to Drive)
+    ├── gmail-signature.ts # Signature lookup, HTML insertion, already-present check
+    ├── gmail-draft-send.ts # Signs a draft's stored MIME (parse, insert, re-encode)
     ├── calendar.ts       # Calendar tools
     ├── contacts.ts       # Contacts / People API tools
     ├── drive.ts          # Drive tools (search, read file, create folder)
