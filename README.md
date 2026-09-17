@@ -25,7 +25,7 @@ This server powers the Google Workspace connector of [DataToRAG](https://datator
 
 **gmail_create_draft / gmail_update_draft** — Create or replace a Gmail draft. Constructs RFC 2822 MIME messages from structured parameters (to, subject, body, cc, bcc) and base64url-encodes them. `gmail_update_draft` preserves threading automatically — if no `thread_id` is provided, it fetches the existing draft's thread ID before replacing the message.
 
-**gmail_read** — Full MIME payload by default. Pass `text_only: true` for a compact view (flattened from/to/cc/subject/date, decoded text body with HTML fallback, attachment metadata) that avoids base64 payloads overflowing the response — typically ~2% of the full size. `max_body_chars` truncates the body with a marker (implies `text_only`).
+**gmail_read** — Full MIME payload by default. Pass `text_only: true` for a compact view (flattened from/to/cc/subject/date, decoded text body with HTML fallback, attachment metadata) that avoids base64 payloads overflowing the response — typically ~2% of the full size. `max_body_chars` truncates the body with a marker (implies `text_only`). When a message has no `text/plain` part, its HTML is flattened to text; at most 512KB of that markup is read, and a message over the limit says so in the returned body. Ordinary mail is far below it.
 
 **gmail_search / gmail_list** — Results are flattened to `{id, threadId, from, to, subject, date, snippet, labelIds}` per message instead of the raw metadata payload.
 

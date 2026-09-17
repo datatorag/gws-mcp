@@ -477,6 +477,16 @@ function findPart(
   return undefined;
 }
 
+/** How much of a message's HTML part is flattened for the text view.
+ *
+ * SCRUM-283: flattening is linear now, so this is defence in depth rather than
+ * the primary control — but the input is an INBOUND message's markup, chosen
+ * by whoever sent the mail, and the only other bound on it is Gmail's ~25MB
+ * message limit. `max_body_chars` is no help here: it truncates the text
+ * AFTER extraction, so it never reduces the work. Real HTML mail, marketing
+ * included, sits far below this. */
+const MAX_HTML_EXTRACT_CHARS = 512 * 1024;
+
 function extractTextBody(payload: GmailPart | undefined): string {
   const plain = findPart(payload, "text/plain");
   if (plain?.body?.data) {
@@ -484,9 +494,20 @@ function extractTextBody(payload: GmailPart | undefined): string {
   }
   const html = findPart(payload, "text/html");
   if (html?.body?.data) {
-    return stripHtml(
-      Buffer.from(html.body.data, "base64url").toString("utf-8")
-    );
+    const raw = Buffer.from(html.body.data, "base64url").toString("utf-8");
+    if (raw.length <= MAX_HTML_EXTRACT_CHARS) return stripHtml(raw);
+    // Said out loud rather than silently: a reader who cannot tell a short
+    // email from a truncated one will read the absence of text as absence of
+    // content.
+    // Do not cut through a surrogate pair: half of one renders as a
+    // replacement character, which reads as corrupted content rather than as
+    // truncated content.
+    let end = MAX_HTML_EXTRACT_CHARS;
+    const last = raw.charCodeAt(end - 1);
+    if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+    return `${stripHtml(raw.slice(0, end))}\n…[truncated ${
+      raw.length - end
+    } of ${raw.length} chars of HTML before text extraction]`;
   }
   return "";
 }
