@@ -175,6 +175,31 @@ function assertCarriableParams(params: Record<string, unknown>): void {
   );
 }
 
+/** Linux refuses a single argv string longer than 128KB (MAX_ARG_STRLEN,
+ * 32 pages). The request body travels as one `--json` argument, so a large
+ * message hits that ceiling and execFile fails with E2BIG. macOS accepts far
+ * more, so this does NOT reproduce on a development Mac — it only appears in
+ * production. Hold the budget below the kernel's so the failure names the
+ * size and the cap instead of surfacing "Argument list too long". */
+export const ARGV_STRING_MAX = 128 * 1024;
+const ARGV_BUDGET = ARGV_STRING_MAX - 1024;
+
+/** Whether a serialized request body fits in one argv string. Exported so a
+ * caller that must not fail the whole call (gmail_send_draft, which sends the
+ * draft unchanged instead) can decide before it rewrites anything. */
+export function argvStringFits(serialized: string): boolean {
+  return Buffer.byteLength(serialized, "utf8") <= ARGV_BUDGET;
+}
+
+function assertArgvStringFits(label: string, serialized: string): void {
+  if (argvStringFits(serialized)) return;
+  throw new Error(
+    `${label} is ${Buffer.byteLength(serialized, "utf8")} bytes; one argument to the ` +
+      `gws CLI can carry at most ${ARGV_BUDGET} (the OS limit is ${ARGV_STRING_MAX}). ` +
+      `Send less content in one call.`
+  );
+}
+
 function getGwsBinaryPath(): string {
   const platform = process.platform;
   const arch = process.arch;
@@ -442,10 +467,14 @@ export class GwsClient {
 
     if (options?.params) {
       assertCarriableParams(options.params);
-      args.push("--params", JSON.stringify(options.params));
+      const params = JSON.stringify(options.params);
+      assertArgvStringFits("--params", params);
+      args.push("--params", params);
     }
     if (options?.jsonBody) {
-      args.push("--json", JSON.stringify(options.jsonBody));
+      const jsonBody = JSON.stringify(options.jsonBody);
+      assertArgvStringFits("The request body", jsonBody);
+      args.push("--json", jsonBody);
     }
     if (options?.pageAll) {
       args.push("--page-all", "--page-limit", "10");
