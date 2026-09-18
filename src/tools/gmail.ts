@@ -5,7 +5,27 @@ import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import type { GwsClient } from "../gws-client.js";
 import { deleteResponse, jsonResponse, stripHtml, truncate } from "./response.js";
+import {
+  applySignature,
+  plainToHtml,
+  lookupSignature,
+  suppressionRequested,
+  type SignatureState,
+} from "./gmail-signature.js";
+import { draftFromHeader, signDraftRaw } from "./gmail-draft-send.js";
+import { argvStringFits } from "../gws-client.js";
 import { encodeAddressHeader, encodeHeaderValue, isAscii } from "./mime-headers.js";
+import {
+  addressOnly,
+  buildReplyBodies,
+  escapeHtml,
+  forwardHtmlBlock,
+  forwardPlainBlock,
+  forwardSubject,
+  replySubject,
+  threadHeaders,
+  type OriginalMessage,
+} from "./gmail-reply.js";
 
 // Shared to/subject/body/cc/bcc schema for gmail_send and the draft tools
 const emailFields = {
@@ -34,21 +54,43 @@ const emailFields = {
   },
 };
 
+/** Only the SEND tools take this. The draft tools never apply a signature, so
+ * offering them the switch would imply they might. */
+const signatureField = {
+  signature: {
+    type: "boolean",
+    description:
+      "Set false to send without the account's Gmail signature, and to skip the lookup entirely. Defaults to true.",
+  },
+};
+
+/** Appended to every send tool's description. The model must not write its
+ * own sign-off: the already-present check only recognises the signature
+ * itself, so a near miss (\"Cheers, Dana\" against \"Cheers, Dana Rivers\")
+ * ships two sign-offs. */
+const SIGNATURE_NOTE =
+  " The account's Gmail signature is appended automatically, so do not write a sign-off or signature in the body yourself; pass signature: false to send without it. The signature goes in the message's HTML part, so a plain-text body is sent as multipart/alternative when the account has one. The response's signature field reports what happened.";
+
+/** Appended to the draft tools' descriptions. */
+const DRAFT_SIGNATURE_NOTE =
+  " No signature is added here — the account's Gmail signature is added when the draft is sent with gmail_send_draft — so do not write a sign-off or signature in the body yourself.";
+
 export const gmailTools: ToolDef[] = [
   {
     name: "gmail_send",
     description:
-      "Send a new email via Gmail. Composes and sends an email message to the specified recipients. Accepts a plain-text body, an HTML html_body, or both — HTML is sent as multipart/alternative with a plain-text fallback.",
+      "Send a new email via Gmail. Composes and sends an email message to the specified recipients. Accepts a plain-text body, an HTML html_body, or both — HTML is sent as multipart/alternative with a plain-text fallback." +
+      SIGNATURE_NOTE,
     inputSchema: {
       type: "object",
-      properties: emailFields,
+      properties: { ...emailFields, ...signatureField },
       required: ["to", "subject"],
     },
     annotations: MUTATE("Send email"),
   },
   {
     name: "gmail_reply",
-    description: "Reply to an existing email thread in Gmail.",
+    description: "Reply to an existing email thread in Gmail." + SIGNATURE_NOTE,
     inputSchema: {
       type: "object",
       properties: {
@@ -62,6 +104,7 @@ export const gmailTools: ToolDef[] = [
           description:
             "HTML reply body. Sent as text/html with no plain-text alternative part (this path hands quoting and threading to a single-part composer); the original message is quoted with Gmail styling. Provide body or html_body, not both.",
         },
+        ...signatureField,
       },
       required: ["message_id"],
     },
@@ -69,7 +112,8 @@ export const gmailTools: ToolDef[] = [
   },
   {
     name: "gmail_forward",
-    description: "Forward an existing email to another recipient.",
+    description:
+      "Forward an existing email to another recipient." + SIGNATURE_NOTE,
     inputSchema: {
       type: "object",
       properties: {
@@ -91,6 +135,7 @@ export const gmailTools: ToolDef[] = [
           description:
             "Optional HTML note included above the forwarded message. Sent as text/html with no plain-text alternative part; the forwarded block is formatted with Gmail styling. Provide body or html_body, not both.",
         },
+        ...signatureField,
       },
       required: ["message_id", "to"],
     },
@@ -167,7 +212,8 @@ export const gmailTools: ToolDef[] = [
   {
     name: "gmail_create_draft",
     description:
-      "Create a draft email in Gmail without sending it. The draft can be reviewed and sent later from Gmail. Returns the draft ID and a link to open it in Gmail. Accepts a plain-text body, an HTML html_body, or both — HTML is stored as multipart/alternative with a plain-text fallback.",
+      "Create a draft email in Gmail without sending it. The draft can be reviewed and sent later from Gmail. Returns the draft ID and a link to open it in Gmail. Accepts a plain-text body, an HTML html_body, or both — HTML is stored as multipart/alternative with a plain-text fallback." +
+      DRAFT_SIGNATURE_NOTE,
     inputSchema: {
       type: "object",
       properties: emailFields,
@@ -178,7 +224,8 @@ export const gmailTools: ToolDef[] = [
   {
     name: "gmail_update_draft",
     description:
-      "Update an existing draft email in Gmail. This fully replaces the draft's message content (Gmail API does not support partial edits). If thread_id is omitted, the tool preserves the existing thread automatically.",
+      "Update an existing draft email in Gmail. This fully replaces the draft's message content (Gmail API does not support partial edits). If thread_id is omitted, the tool preserves the existing thread automatically." +
+      DRAFT_SIGNATURE_NOTE,
     inputSchema: {
       type: "object",
       properties: {
@@ -200,7 +247,9 @@ export const gmailTools: ToolDef[] = [
   {
     name: "gmail_send_draft",
     description:
-      "Send an existing Gmail draft by its draft ID. Use this to send a draft that was previously created with gmail_create_draft and reviewed — it sends the draft as-is and removes it from the Drafts folder (no orphaned draft). Returns the sent message metadata.",
+      "Send an existing Gmail draft by its draft ID. Use this to send a draft that was previously created with gmail_create_draft and reviewed — it sends the draft as-is apart from the signature, and removes it from the Drafts folder (no orphaned draft). Returns the sent message metadata." +
+      SIGNATURE_NOTE +
+      " A draft holding an attachment, an inline image or any shape other than plain text or plain-plus-HTML is sent untouched and reports skipped_unsupported_draft.",
     inputSchema: {
       type: "object",
       properties: {
@@ -208,6 +257,7 @@ export const gmailTools: ToolDef[] = [
           type: "string",
           description: "The Gmail draft ID to send",
         },
+        ...signatureField,
       },
       required: ["draft_id"],
     },
@@ -477,6 +527,16 @@ function findPart(
   return undefined;
 }
 
+/** How much of a message's HTML part is flattened for the text view.
+ *
+ * SCRUM-283: flattening is linear now, so this is defence in depth rather than
+ * the primary control — but the input is an INBOUND message's markup, chosen
+ * by whoever sent the mail, and the only other bound on it is Gmail's ~25MB
+ * message limit. `max_body_chars` is no help here: it truncates the text
+ * AFTER extraction, so it never reduces the work. Real HTML mail, marketing
+ * included, sits far below this. */
+const MAX_HTML_EXTRACT_CHARS = 512 * 1024;
+
 function extractTextBody(payload: GmailPart | undefined): string {
   const plain = findPart(payload, "text/plain");
   if (plain?.body?.data) {
@@ -484,9 +544,20 @@ function extractTextBody(payload: GmailPart | undefined): string {
   }
   const html = findPart(payload, "text/html");
   if (html?.body?.data) {
-    return stripHtml(
-      Buffer.from(html.body.data, "base64url").toString("utf-8")
-    );
+    const raw = Buffer.from(html.body.data, "base64url").toString("utf-8");
+    if (raw.length <= MAX_HTML_EXTRACT_CHARS) return stripHtml(raw);
+    // Said out loud rather than silently: a reader who cannot tell a short
+    // email from a truncated one will read the absence of text as absence of
+    // content.
+    // Do not cut through a surrogate pair: half of one renders as a
+    // replacement character, which reads as corrupted content rather than as
+    // truncated content.
+    let end = MAX_HTML_EXTRACT_CHARS;
+    const last = raw.charCodeAt(end - 1);
+    if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+    return `${stripHtml(raw.slice(0, end))}\n…[truncated ${
+      raw.length - end
+    } of ${raw.length} chars of HTML before text extraction]`;
   }
   return "";
 }
@@ -549,20 +620,30 @@ function htmlOrPlainBody(
   return body !== undefined ? { body } : {};
 }
 
-function buildRawMessage(
-  toolName: string,
-  args: Record<string, unknown>
-): string {
-  const { body, html } = resolveBody(toolName, args);
-  // A header is ASCII or it is not a header (SCRUM-249): the subject and any
-  // display name go out RFC 2047 encoded when they need it, addresses never.
-  // A line break in any of them is refused outright: encoded it would be
-  // harmless, bare it would start a header the caller never asked for.
+/** A header is ASCII or it is not a header (SCRUM-249): the subject and any
+ * display name go out RFC 2047 encoded when they need it, addresses never.
+ * A line break in any of them is refused outright: encoded it would be
+ * harmless, bare it would start a header the caller never asked for.
+ *
+ * Called before the signature lookup as well as inside the raw builder, so a
+ * malformed header costs no API call at all. */
+function assertHeadersSingleLine(args: Record<string, unknown>): void {
   for (const k of ["to", "subject", "cc", "bcc"]) {
     if (typeof args[k] === "string" && /[\r\n]/.test(args[k] as string)) {
       throw new Error(`${k} must not contain a line break`);
     }
   }
+}
+
+/** `bodies` is passed in rather than read off `args` so the signature can be
+ * applied to the RESOLVED body before any path branches (SCRUM-278). */
+function buildRawMessage(
+  toolName: string,
+  args: Record<string, unknown>,
+  bodies: { body?: string; html?: string; unsignedHtml?: string }
+): string {
+  const { body, html } = bodies;
+  assertHeadersSingleLine(args);
   const headers = [
     `To: ${encodeAddressHeader(args.to as string)}`,
     `Subject: ${encodeHeaderValue(args.subject as string)}`,
@@ -589,7 +670,10 @@ function buildRawMessage(
       `--${boundary}`,
       "Content-Type: text/plain; charset=utf-8",
       "",
-      body ?? stripHtml(html),
+      // Derived from the markup BEFORE the signature, so the plain part never
+      // carries it. Derived HERE and nowhere earlier, because this is the only
+      // place a plain part is actually built.
+      body ?? stripHtml(bodies.unsignedHtml ?? html),
       `--${boundary}`,
       "Content-Type: text/html; charset=utf-8",
       "",
@@ -733,6 +817,205 @@ async function modifyMessageLabels(
   return jsonResponse(data?.id ? data : { id: args.message_id, ...body });
 }
 
+/** Every send tool's response carries the signature outcome, so a caller can
+ * tell an applied signature from a missing one from a failed lookup. */
+function sentResponse(data: unknown, signature: SignatureState) {
+  const base = data && typeof data === "object" ? (data as Record<string, unknown>) : {};
+  return jsonResponse({ ...base, signature });
+}
+
+/** Sign the body for the CLI helpers that have ONE body slot (+reply,
+ * +forward). When a signature promotes a plain note to HTML, the HTML is what
+ * goes out with --html and the CLI quotes the original beneath it, which is
+ * how the signature lands above the quoted message rather than below it. */
+/** Sign a reply/forward body and hand back the BODIES, not CLI flags.
+ *
+ * It used to return `{ body, html: true }` for the CLI helper, which forced a
+ * signed reply down a single-part text/html composer and cost it its plain
+ * alternative. The caller now builds multipart/alternative from both of these,
+ * so `unsignedHtml` matters: it is what the plain part is derived from, so the
+ * signature can never reach it. */
+async function signSingleSlotBody(
+  client: GwsClient,
+  toolName: string,
+  args: Record<string, unknown>,
+  opts?: { requireBody?: boolean }
+): Promise<{
+  body?: string;
+  html?: string;
+  unsignedHtml?: string;
+  state: SignatureState;
+}> {
+  // Both argument contract errors are raised BEFORE signing, so a bad call
+  // costs no API call and the error is never about something added here.
+  htmlOrPlainBody(toolName, args);
+  if (opts?.requireBody && args.body === undefined && args.html_body === undefined) {
+    throw new Error(`${toolName}: provide body (plain text) or html_body (HTML).`);
+  }
+
+  const body = args.body as string | undefined;
+  const html = args.html_body as string | undefined;
+  const signed = await applySignature(
+    client,
+    args,
+    html !== undefined ? { html } : { body: body ?? "" }
+  );
+  return {
+    body: signed.body,
+    html: signed.html,
+    unsignedHtml: signed.unsignedHtml,
+    state: signed.state,
+  };
+}
+
+/** Send a draft, signing the MIME Gmail already stored for it.
+ *
+ * Nothing here may cost the user their send. A shape we will not rewrite, a
+ * signature we cannot read, or a rewrite that no longer fits in one argv
+ * string all fall through to sending the draft exactly as it stands, with the
+ * reason in the response. If the update lands and the send then fails, a
+ * retry finds the signature already there and does not add a second one. */
+async function sendDraft(client: GwsClient, args: Record<string, unknown>) {
+  const draftId = args.draft_id as string;
+  const send = async (signature: SignatureState) => {
+    const result = await client.api("gmail", "users.drafts", "send", {
+      params: { userId: "me" },
+      jsonBody: { id: draftId },
+    });
+    return sentResponse(result.data, signature);
+  };
+
+  if (suppressionRequested(args.signature)) return send("suppressed");
+
+  // Nothing below may cost the user their send, so every failure falls
+  // through to sending the draft as it stands. A get we cannot complete is
+  // reported `unavailable` — we could not read what we needed, the same
+  // family as a failed signature lookup — while a shape or a rewrite we
+  // decline is `skipped_unsupported_draft`.
+  let message: { raw?: string; threadId?: string } | undefined;
+  try {
+    const existing = await client.api("gmail", "users.drafts", "get", {
+      params: { userId: "me", id: draftId, format: "raw" },
+    });
+    message = (existing.data as { message?: { raw?: string; threadId?: string } } | undefined)
+      ?.message;
+  } catch {
+    return send("unavailable");
+  }
+  if (!message?.raw) return send("skipped_unsupported_draft");
+
+  // A Gmail draft can be written from an alias, so the signature comes from
+  // the sendAs entry matching the draft's own From header.
+  const sig = await lookupSignature(client, draftFromHeader(message.raw));
+  if (!sig.ok) return send(sig.state);
+
+  // Wrapped because the guarantee above is that NOTHING here costs the user
+  // their send, and a guarantee that rests on "this function cannot throw" is
+  // an argument rather than a control.
+  let rewritten: ReturnType<typeof signDraftRaw>;
+  try {
+    rewritten = signDraftRaw(message.raw, sig);
+  } catch {
+    return send("skipped_unsupported_draft");
+  }
+  if (rewritten.state !== "applied" || !rewritten.raw) return send(rewritten.state);
+
+  const updateBody: Record<string, unknown> = { raw: rewritten.raw };
+  if (message.threadId) updateBody.threadId = message.threadId;
+  if (!argvStringFits(JSON.stringify({ message: updateBody }))) {
+    return send("skipped_unsupported_draft");
+  }
+
+  try {
+    await client.api("gmail", "users.drafts", "update", {
+      params: { userId: "me", id: draftId },
+      jsonBody: { message: updateBody },
+    });
+  } catch {
+    // Gmail refused our rewrite. The draft is untouched on the server, so
+    // send what the user actually wrote rather than failing their send.
+    return send("skipped_unsupported_draft");
+  }
+  return send("applied");
+}
+
+/** How much markup is flattened when a plain alternative has to be DERIVED.
+ *
+ * Deriving one means running the shared flattener over caller- or
+ * sender-supplied markup. On this branch that flattener is still the quadratic
+ * one (SCRUM-283 fixes it separately), and composing replies here newly puts
+ * it on the reply and forward paths, so the input is bounded before it gets
+ * there rather than after. Same guard the read path uses. */
+const PLAIN_DERIVE_MAX = 128 * 1024;
+
+function derivePlain(html: string): string {
+  if (html.length <= PLAIN_DERIVE_MAX) return stripHtml(html);
+  return `${stripHtml(html.slice(0, PLAIN_DERIVE_MAX))}\n…[truncated]`;
+}
+
+/** The original message a reply or forward is built from.
+ *
+ * Read through the API rather than left to the CLI helper: the helper accepts
+ * ONE body and a boolean --html, so it can emit text/plain OR a single
+ * text/html part and never both, which is why a signed reply used to lose its
+ * plain alternative. Composing here is what makes multipart/alternative
+ * possible on every send path. */
+async function fetchOriginal(
+  client: GwsClient,
+  messageId: string
+): Promise<{ original: OriginalMessage; threadId?: string }> {
+  const result = await client.api("gmail", "users.messages", "get", {
+    params: { userId: "me", id: messageId, format: "full" },
+  });
+  const message = result.data as GmailMessage;
+  const headers = message.payload?.headers ?? [];
+  const header = (name: string) =>
+    headers.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value ?? "";
+  const decode = (mime: string) => {
+    const part = findPart(message.payload, mime);
+    return part?.body?.data
+      ? Buffer.from(part.body.data, "base64url").toString("utf-8")
+      : undefined;
+  };
+  return {
+    threadId: message.threadId,
+    original: {
+      from: header("From"),
+      date: header("Date"),
+      subject: header("Subject"),
+      messageId: header("Message-ID") || header("Message-Id"),
+      references: header("References") || undefined,
+      plain: decode("text/plain"),
+      html: decode("text/html"),
+    },
+  };
+}
+
+/** multipart/alternative, plain part FIRST so clients that prefer the last
+ * renderable part still choose the HTML. Identical shape to buildRawMessage's
+ * multipart branch, which is the point: one MIME shape for every send path. */
+function buildAlternativeRaw(
+  headers: string[],
+  plain: string,
+  html: string
+): string {
+  const boundary = `=_gws_${randomUUID()}`;
+  const all = [...headers, "MIME-Version: 1.0", `Content-Type: multipart/alternative; boundary="${boundary}"`];
+  const content = [
+    `--${boundary}`,
+    "Content-Type: text/plain; charset=utf-8",
+    "",
+    plain,
+    `--${boundary}`,
+    "Content-Type: text/html; charset=utf-8",
+    "",
+    html,
+    `--${boundary}--`,
+    "",
+  ].join("\r\n");
+  return Buffer.from(`${all.join("\r\n")}\r\n\r\n${content}`).toString("base64url");
+}
+
 export async function handleGmail(
   client: GwsClient,
   toolName: string,
@@ -740,7 +1023,13 @@ export async function handleGmail(
 ) {
   switch (toolName) {
     case "gmail_send": {
-      const { html } = resolveBody(toolName, args);
+      assertHeadersSingleLine(args);
+      // The signature is applied to the resolved body BEFORE the paths
+      // branch: a plain ASCII send goes through the CLI helper and never
+      // reaches buildRawMessage, so injecting further down would have missed
+      // the most common send there is.
+      const signed = await applySignature(client, args, resolveBody(toolName, args));
+      const { body, html } = signed;
       // A plain send with a non-ASCII subject or display name takes the raw
       // path as well (SCRUM-249), so the header encoding is this module's on
       // every route rather than left to the CLI's own MIME writer.
@@ -750,45 +1039,88 @@ export async function handleGmail(
       if (html !== undefined || needsEncoding) {
         // The CLI's +send --html emits a single text/html part with no
         // fallback; the raw API path sends multipart/alternative instead,
-        // the same shape as the draft tools.
+        // the same shape as the draft tools. A plain send carrying a
+        // signature arrives here too, so the signature's real markup travels
+        // rather than a flattened text copy.
         const result = await client.api("gmail", "users.messages", "send", {
           params: { userId: "me" },
-          jsonBody: { raw: buildRawMessage(toolName, args) },
+          jsonBody: { raw: buildRawMessage(toolName, args, signed) },
         });
-        return jsonResponse(result.data);
+        return sentResponse(result.data, signed.state);
       }
-      const flags: Record<string, string> = {
-        to: args.to as string,
-        subject: args.subject as string,
-        body: args.body as string,
-      };
-      if (args.cc) flags.cc = args.cc as string;
-      if (args.bcc) flags.bcc = args.bcc as string;
-      const result = await client.helper("gmail", "send", flags);
-      return jsonResponse(result.data);
+      // Every send now goes out as raw MIME we built. The CLI helper is no
+      // longer on any send path, so the wire shape no longer depends on which
+      // branch a call happened to take.
+      const result = await client.api("gmail", "users.messages", "send", {
+        params: { userId: "me" },
+        jsonBody: { raw: buildRawMessage(toolName, args, signed) },
+      });
+      return sentResponse(result.data, signed.state);
     }
 
     case "gmail_reply": {
-      const bodyFlags = htmlOrPlainBody(toolName, args);
-      if (!("body" in bodyFlags)) {
-        throw new Error(
-          `${toolName}: provide body (plain text) or html_body (HTML).`
-        );
-      }
-      const result = await client.helper("gmail", "reply", {
-        "message-id": args.message_id as string,
-        ...bodyFlags,
+      // Composing here puts reply on the same raw header path as gmail_send,
+      // so it needs the same guard. encodeAddressHeader is NOT a defence: it
+      // returns a value containing CRLF verbatim.
+      assertHeadersSingleLine(args);
+      const signed = await signSingleSlotBody(client, toolName, args, {
+        requireBody: true,
       });
-      return jsonResponse(result.data);
+      const { original, threadId } = await fetchOriginal(
+        client,
+        args.message_id as string
+      );
+      const plainBody =
+        (args.body as string | undefined) ??
+        derivePlain(signed.unsignedHtml ?? (args.html_body as string) ?? "");
+      const bodies = buildReplyBodies(
+        original,
+        plainBody,
+        signed.html ?? plainToHtml(plainBody),
+        derivePlain
+      );
+      const headers = [
+        `To: ${encodeAddressHeader(addressOnly(original.from))}`,
+        `Subject: ${encodeHeaderValue(replySubject(original.subject))}`,
+        ...threadHeaders(original),
+      ];
+      const result = await client.api("gmail", "users.messages", "send", {
+        params: { userId: "me" },
+        jsonBody: {
+          raw: buildAlternativeRaw(headers, bodies.plain, bodies.html),
+          ...(threadId ? { threadId } : {}),
+        },
+      });
+      return sentResponse(result.data, signed.state);
     }
 
     case "gmail_forward": {
-      const result = await client.helper("gmail", "forward", {
-        "message-id": args.message_id as string,
-        to: args.to as string,
-        ...htmlOrPlainBody(toolName, args),
+      assertHeadersSingleLine(args);
+      const signed = await signSingleSlotBody(client, toolName, args);
+      const { original } = await fetchOriginal(client, args.message_id as string);
+      const to = args.to as string;
+      const note = (args.body as string | undefined) ?? "";
+      const noteHtml = signed.html ?? plainToHtml(note);
+      const originalPlain = original.plain ?? derivePlain(original.html ?? "");
+      const originalHtml =
+        original.html ??
+        `<div dir="ltr">${escapeHtml(original.plain ?? "").replace(/\r\n|\r|\n/g, "<br>")}</div>`;
+      const headers = [
+        `To: ${encodeAddressHeader(to)}`,
+        `Subject: ${encodeHeaderValue(forwardSubject(original.subject))}`,
+        ...threadHeaders(original),
+      ];
+      const result = await client.api("gmail", "users.messages", "send", {
+        params: { userId: "me" },
+        jsonBody: {
+          raw: buildAlternativeRaw(
+            headers,
+            [note, "", forwardPlainBlock(original, to, originalPlain)].join("\n"),
+            `${noteHtml}<br>\n${forwardHtmlBlock(original, to, originalHtml)}`
+          ),
+        },
       });
-      return jsonResponse(result.data);
+      return sentResponse(result.data, signed.state);
     }
 
     case "gmail_read": {
@@ -875,7 +1207,7 @@ export async function handleGmail(
     }
 
     case "gmail_create_draft": {
-      const raw = buildRawMessage(toolName, args);
+      const raw = buildRawMessage(toolName, args, resolveBody(toolName, args));
       const result = await client.api("gmail", "users.drafts", "create", {
         params: { userId: "me" },
         jsonBody: { message: { raw } },
@@ -895,7 +1227,7 @@ export async function handleGmail(
         threadId = existingData?.message?.threadId;
       }
 
-      const raw = buildRawMessage(toolName, args);
+      const raw = buildRawMessage(toolName, args, resolveBody(toolName, args));
       const message: Record<string, unknown> = { raw };
       if (threadId) message.threadId = threadId;
 
@@ -906,13 +1238,8 @@ export async function handleGmail(
       return draftResponse(result.data);
     }
 
-    case "gmail_send_draft": {
-      const result = await client.api("gmail", "users.drafts", "send", {
-        params: { userId: "me" },
-        jsonBody: { id: args.draft_id },
-      });
-      return jsonResponse(result.data);
-    }
+    case "gmail_send_draft":
+      return sendDraft(client, args);
 
     case "gmail_delete_draft": {
       await client.api("gmail", "users.drafts", "delete", {

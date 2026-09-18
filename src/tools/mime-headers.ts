@@ -70,24 +70,41 @@ function splitAddresses(list: string): string[] {
 
 /** `Name <addr>` with a non-ASCII name becomes `=?UTF-8?B?...?= <addr>`; the
  * address itself is never touched, and an ASCII entry passes through as it was. */
+/** Defence in depth for the address encoders.
+ *
+ * `encodeHeaderValue` is safe by accident: `isAscii` excludes CR and LF, so a
+ * value carrying one is B-encoded and the break stops being structural. The
+ * address path has no such luck — a CRLF address has no angle-addr, so it is
+ * returned verbatim and a `\r\nBcc:` becomes a real header. Callers are
+ * expected to reject line breaks in their own arguments before reaching here;
+ * this fold is so that forgetting to is not exploitable. */
+function foldLineBreaks(value: string): string {
+  return value.replace(/[\r\n]+/g, " ");
+}
+
 export function encodeAddressHeader(list: string): string {
   if (isAscii(list)) return list;
   return splitAddresses(list)
     .map((entry) => {
       const m = /^(.*?)\s*<([^<>]+)>$/.exec(entry);
-      if (!m) return entry; // a bare address: nothing to encode
+      // A bare address: nothing to ENCODE, but a line break in it would
+      // still be structural, so it is folded.
+      if (!m) return foldLineBreaks(entry);
+      // Folded ONCE, here, because three of the returns below interpolate it
+      // and a per-branch fold is one someone can forget.
+      const addr = foldLineBreaks(m[2]);
       let name = m[1].trim();
       if (name.startsWith('"') && name.endsWith('"') && name.length >= 2) {
         name = name.slice(1, -1);
       }
-      if (name === "") return `<${m[2]}>`;
+      if (name === "") return `<${addr}>`;
       // An ASCII name in a list that needed encoding elsewhere keeps its
       // quotes when it needs them (a comma or another special inside it),
       // so it stays one entry.
       if (isAscii(name)) {
-        return /[",;:<>@()\\[\]]/.test(name) ? `"${name.replace(/"/g, '\\"')}" <${m[2]}>` : `${name} <${m[2]}>`;
+        return /[",;:<>@()\\[\]]/.test(name) ? `"${name.replace(/"/g, '\\"')}" <${addr}>` : `${name} <${addr}>`;
       }
-      return `${encodeHeaderValue(name)} <${m[2]}>`;
+      return `${encodeHeaderValue(name)} <${addr}>`;
     })
     .join(", ");
 }

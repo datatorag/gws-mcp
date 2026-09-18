@@ -70,3 +70,23 @@ describe("encodeAddressHeader", () => {
     expect(decodeHeader(encoded)).toBe("Müller, Jörg <jorg@example.com>");
   });
 });
+
+describe("address headers cannot carry a line break (gate finding)", () => {
+  it("folds CRLF out of a bare address instead of returning it verbatim", () => {
+    const out = encodeAddressHeader("victim@example.com\r\nBcc: attacker@example.com");
+    expect(out).not.toMatch(/[\r\n]/);
+    expect(out).toContain("victim@example.com");
+  });
+
+  it("folds CRLF out of the address inside a display-name form", () => {
+    const out = encodeAddressHeader('"N" <a@b.c\r\nBcc: attacker@example.com>');
+    expect(out).not.toMatch(/[\r\n]/);
+  });
+
+  it("still FOLDS a long encoded value with CRLF, which is legal and wanted", () => {
+    // The guard must not break RFC 2047 continuation folding, which is the
+    // one place a CRLF in a header value is correct.
+    const out = encodeAddressHeader(`${"ü".repeat(200)} <a@b.c>`);
+    expect(out).toMatch(/\r\n /);
+  });
+});
