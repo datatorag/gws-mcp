@@ -8,6 +8,43 @@ export const MEDIA_TIMEOUT_MS = 120_000;
 /** gws_run's page_all stops here, as the CLI transport's --page-limit did. */
 export const PAGE_ALL_LIMIT = 10;
 
+/** The most one JSON or text response may hold. The CLI transport bounded
+ * this with its stdout buffer; the bound is restated here because the reason
+ * for it did not leave with that transport: every session shares this
+ * process, and gws_run lets a caller ask for anything, so one oversized body
+ * must fail that call rather than exhaust memory for everyone. Media does not
+ * come through here; it streams (directDownload). */
+export const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
+
+/** Read a response body as text, refusing past `limit` without holding it. */
+export async function readCapped(res: Response, label: string, limit = MAX_RESPONSE_BYTES): Promise<string> {
+  if (!res.body) return "";
+  const declared = Number(res.headers.get("content-length"));
+  const tooLarge = () =>
+    new Error(
+      `${label}: the response is larger than ${limit} bytes, the most one call may return. ` +
+        `Ask for less (fields, a narrower range, fewer results per page).`
+    );
+  if (Number.isFinite(declared) && declared > limit) {
+    await res.body.cancel().catch(() => {});
+    throw tooLarge();
+  }
+  const reader = res.body.getReader();
+  const held: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.length;
+    if (size > limit) {
+      await reader.cancel().catch(() => {});
+      throw tooLarge();
+    }
+    held.push(value);
+  }
+  return Buffer.concat(held).toString("utf8");
+}
+
 export interface ApiOptions {
   params?: Record<string, unknown>;
   jsonBody?: unknown;
@@ -75,7 +112,11 @@ function throwNetworkError(err: unknown, label: string): never {
   if (e?.name === "TimeoutError" || e?.name === "AbortError") {
     throw new TransientGwsError(`${label} timed out (ETIMEDOUT)`);
   }
-  const code = e?.cause?.code ?? e?.code ?? e?.name ?? "network error";
+  // Only a value that looks like an error code is echoed. The guarantee is
+  // that nothing from the request can ride out in an error, and that should
+  // not rest on what a given fetch implementation chooses to put in `code`.
+  const raw = e?.cause?.code ?? e?.code ?? e?.name;
+  const code = typeof raw === "string" && /^[A-Z][A-Za-z0-9_]{0,40}$/.test(raw) ? raw : "network error";
   const text = `${label} could not reach Google: ${code}`;
   throw isTransient(text) ? new TransientGwsError(text) : new Error(text);
 }
@@ -86,7 +127,8 @@ function throwNetworkError(err: unknown, label: string): never {
  * to it: a header is input, and the token must not follow it off Google. */
 export function assertGoogleApiUrl(url: string): URL {
   const parsed = new URL(url);
-  if (parsed.protocol !== "https:" || !(parsed.hostname === "googleapis.com" || parsed.hostname.endsWith(".googleapis.com"))) {
+  const googleHost = parsed.hostname === "googleapis.com" || parsed.hostname.endsWith(".googleapis.com");
+  if (parsed.protocol !== "https:" || !googleHost || parsed.port !== "" || parsed.username !== "" || parsed.password !== "") {
     throw new Error("Refusing to send credentials to a non-Google URL.");
   }
   return parsed;
@@ -166,7 +208,7 @@ export async function directApi(
       timeout: options?.pageAll ? PAGE_ALL_TIMEOUT_MS : DEFAULT_TIMEOUT_MS,
       extraQuery,
     });
-    const text = await res.text();
+    const text = await readCapped(res, label);
     if (!res.ok) throwApiError(res.status, text);
     return text;
   };
@@ -201,7 +243,7 @@ export async function directDownload(
   const request = buildRequest(service, resource, method, { params: { ...params, alt: "media" } });
   const label = `${service} ${resource} ${method}`;
   const res = await send(token, request, label, { timeout: MEDIA_TIMEOUT_MS });
-  if (!res.ok) throwApiError(res.status, await res.text());
+  if (!res.ok) throwApiError(res.status, await readCapped(res, label));
   if (!res.body) throw new Error(`${label} returned no content`);
   const length = Number(res.headers.get("content-length"));
   return {
