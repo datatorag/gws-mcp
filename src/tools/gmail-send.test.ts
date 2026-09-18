@@ -35,6 +35,27 @@ function parseMultipart(mime: string) {
  * to before" is made of. */
 const NO_SIG = { data: { sendAs: [{ isDefault: true, signature: "" }] } };
 
+
+/** The original every reply and forward now READS before composing. The CLI
+ * helper used to do this fetch inside the binary; owning it is what makes a
+ * multipart/alternative reply possible, and it costs one extra API call. */
+const ORIGINAL = {
+  data: {
+    id: "m1",
+    threadId: "t1",
+    payload: {
+      headers: [
+        { name: "From", value: "Sender Name <sender@example.com>" },
+        { name: "Date", value: "Thu, 1 Jan 2026 00:00:00 +0000" },
+        { name: "Subject", value: "Original subject" },
+        { name: "Message-ID", value: "<ABC@example.com>" },
+      ],
+      mimeType: "text/plain",
+      body: { data: Buffer.from("Original message body").toString("base64url") },
+    },
+  },
+};
+
 describe("plain-text compose (unchanged shape)", () => {
   it("gmail_create_draft with body only emits single-part text/plain", async () => {
     const { client, calls } = fakeClient([
@@ -52,7 +73,7 @@ describe("plain-text compose (unchanged shape)", () => {
     expect(mime).toContain("plain words");
   });
 
-  it("gmail_send with body only still goes through the CLI helper", async () => {
+  it("gmail_send with body only now sends raw MIME, NOT the CLI helper", async () => {
     const { client, calls } = fakeClient([NO_SIG, { data: { id: "m1" } }]);
     await handleGmail(client, "gmail_send", {
       to: "a@example.com",
@@ -60,11 +81,12 @@ describe("plain-text compose (unchanged shape)", () => {
       body: "plain words",
     });
 
-    expect(calls[1]).toMatchObject({
-      service: "gmail",
-      command: "send",
-      flags: { to: "a@example.com", subject: "Hi", body: "plain words" },
-    });
+    expect(calls[1]).toMatchObject({ service: "gmail", resource: "users.messages", method: "send" });
+    // The helper is gone from every send path, so no call may carry a command.
+    expect(calls.every((c) => c.command === undefined)).toBe(true);
+    const mime = rawMime(calls[1]);
+    expect(mime).toContain("Content-Type: text/plain; charset=utf-8");
+    expect(mime).toContain("plain words");
   });
 });
 
@@ -132,55 +154,77 @@ describe("html_body composes multipart/alternative", () => {
   });
 });
 
-describe("reply and forward route html through the CLI helper", () => {
-  it("gmail_reply with html_body passes --body <html> --html", async () => {
-    const { client, calls } = fakeClient([NO_SIG, { data: { id: "m2" } }]);
+describe("reply and forward compose multipart/alternative themselves", () => {
+  it("gmail_reply ALWAYS builds both parts, which the CLI helper could not", async () => {
+    const { client, calls } = fakeClient([NO_SIG, ORIGINAL, { data: { id: "m2" } }]);
     await handleGmail(client, "gmail_reply", {
       message_id: "m1",
       html_body: "<b>Bold reply</b>",
     });
 
-    expect(calls[1]).toMatchObject({
-      service: "gmail",
-      command: "reply",
-      flags: { "message-id": "m1", body: "<b>Bold reply</b>", html: true },
-    });
+    const mime = rawMime(calls[2]);
+    expect(mime).toContain("multipart/alternative");
+    expect(mime).toContain("Content-Type: text/plain; charset=utf-8");
+    expect(mime).toContain("Content-Type: text/html; charset=utf-8");
+    expect(mime).toContain("<b>Bold reply</b>");
   });
 
-  it("gmail_reply with plain body passes no --html flag", async () => {
-    const { client, calls } = fakeClient([NO_SIG, { data: { id: "m2" } }]);
-    await handleGmail(client, "gmail_reply", {
-      message_id: "m1",
-      body: "plain reply",
-    });
+  it("gmail_reply with a PLAIN body keeps its text/plain part", async () => {
+    // The whole reason for this refactor: the helper turned a signed plain
+    // reply into single-part text/html and the plain alternative vanished.
+    const { client, calls } = fakeClient([NO_SIG, ORIGINAL, { data: { id: "m2" } }]);
+    await handleGmail(client, "gmail_reply", { message_id: "m1", body: "plain reply" });
 
-    const flags = calls[1].flags as Record<string, unknown>;
-    expect(flags).toEqual({ "message-id": "m1", body: "plain reply" });
+    const mime = rawMime(calls[2]);
+    expect(mime).toContain("multipart/alternative");
+    const plainPart = mime.split("Content-Type: text/html")[0];
+    expect(plainPart).toContain("plain reply");
   });
 
-  it("gmail_forward accepts an html note", async () => {
-    const { client, calls } = fakeClient([NO_SIG, { data: { id: "m3" } }]);
+  it("gmail_reply threads by In-Reply-To, References AND threadId", async () => {
+    const { client, calls } = fakeClient([NO_SIG, ORIGINAL, { data: { id: "m2" } }]);
+    await handleGmail(client, "gmail_reply", { message_id: "m1", body: "x" });
+
+    const mime = rawMime(calls[2]);
+    expect(mime).toContain("In-Reply-To: <ABC@example.com>");
+    expect(mime).toContain("References: <ABC@example.com>");
+    expect(mime).toContain("Subject: Re: Original subject");
+    // Replying to a display-name From must address the BARE address.
+    expect(mime).toContain("To: sender@example.com");
+    expect((calls[2].jsonBody as { threadId?: string }).threadId).toBe("t1");
+  });
+
+  it("gmail_reply quotes the original in BOTH parts", async () => {
+    const { client, calls } = fakeClient([NO_SIG, ORIGINAL, { data: { id: "m2" } }]);
+    await handleGmail(client, "gmail_reply", { message_id: "m1", body: "x" });
+
+    const mime = rawMime(calls[2]);
+    expect(mime).toContain("> Original message body");
+    expect(mime).toContain("gmail_quote");
+  });
+
+  it("gmail_forward carries the forwarded-message header block", async () => {
+    const { client, calls } = fakeClient([NO_SIG, ORIGINAL, { data: { id: "m3" } }]);
     await handleGmail(client, "gmail_forward", {
       message_id: "m1",
       to: "b@example.com",
       html_body: "<p>FYI</p>",
     });
 
-    expect(calls[1]).toMatchObject({
-      service: "gmail",
-      command: "forward",
-      flags: { "message-id": "m1", to: "b@example.com", body: "<p>FYI</p>", html: true },
-    });
+    const mime = rawMime(calls[2]);
+    expect(mime).toContain("Subject: Fwd: Original subject");
+    expect(mime).toContain("To: b@example.com");
+    expect(mime).toContain("---------- Forwarded message ---------");
+    expect(mime).toContain("<p>FYI</p>");
   });
 
-  it("gmail_forward without a note sends neither body nor html flags", async () => {
-    const { client, calls } = fakeClient([NO_SIG, { data: { id: "m3" } }]);
-    await handleGmail(client, "gmail_forward", {
-      message_id: "m1",
-      to: "b@example.com",
-    });
+  it("gmail_forward without a note still forwards the original", async () => {
+    const { client, calls } = fakeClient([NO_SIG, ORIGINAL, { data: { id: "m3" } }]);
+    await handleGmail(client, "gmail_forward", { message_id: "m1", to: "b@example.com" });
 
-    expect(calls[1].flags).toEqual({ "message-id": "m1", to: "b@example.com" });
+    const mime = rawMime(calls[2]);
+    expect(mime).toContain("---------- Forwarded message ---------");
+    expect(mime).toContain("Original message body");
   });
 });
 
@@ -282,10 +326,11 @@ describe("non-ASCII headers are RFC 2047 encoded (SCRUM-249)", () => {
     expect(mime.split("\r\n\r\n").slice(1).join("\r\n\r\n")).toContain("plain words");
   });
 
-  it("plain send with ASCII headers still goes through the CLI helper", async () => {
+  it("plain send with ASCII headers takes the SAME raw path as every other send", async () => {
     const { client, calls } = fakeClient([NO_SIG, { data: { id: "m1" } }]);
     await handleGmail(client, "gmail_send", { to: "a@example.com", subject: "Hi", body: "x" });
-    expect(calls[1]).toMatchObject({ command: "send" });
+    expect(calls[1]).toMatchObject({ resource: "users.messages", method: "send" });
+    expect(calls[1].command).toBeUndefined();
   });
 
   it("drafts encode the display name in To and leave the address bare", async () => {
@@ -408,8 +453,12 @@ describe("signature on send (SCRUM-278)", () => {
       body: "plain words",
     });
     expect(calls).toHaveLength(2);
-    expect(calls[1]).toMatchObject({ service: "gmail", command: "send" });
-    expect(calls[1].flags).toEqual({ to: "a@b.c", subject: "Hi", body: "plain words" });
+    expect(calls[1]).toMatchObject({ service: "gmail", resource: "users.messages", method: "send" });
+    const mime = rawMime(calls[1]);
+    // Unsigned plain stays a SINGLE text/plain part: no signature means no
+    // reason to promote it to multipart.
+    expect(mime).not.toContain("multipart/alternative");
+    expect(mime).toContain("plain words");
     expect(payload(res).signature).toBe("none_set");
   });
 
@@ -422,8 +471,10 @@ describe("signature on send (SCRUM-278)", () => {
       signature: false,
     });
     expect(calls).toHaveLength(1);
-    expect(calls[0]).toMatchObject({ command: "send" });
-    expect(calls[0].flags).toEqual({ to: "a@b.c", subject: "Hi", body: "plain words" });
+    expect(calls[0]).toMatchObject({ resource: "users.messages", method: "send" });
+    const mime = rawMime(calls[0]);
+    expect(mime).toContain("plain words");
+    expect(mime).not.toContain("gmail_signature");
     expect(payload(res).signature).toBe("suppressed");
   });
 
@@ -434,8 +485,8 @@ describe("signature on send (SCRUM-278)", () => {
       subject: "Hi",
       body: "plain words",
     });
-    expect(calls[1]).toMatchObject({ command: "send" });
-    expect(calls[1].flags).toEqual({ to: "a@b.c", subject: "Hi", body: "plain words" });
+    expect(calls[1]).toMatchObject({ resource: "users.messages", method: "send" });
+    expect(rawMime(calls[1])).toContain("plain words");
     expect(payload(res).signature).toBe("unavailable");
   });
 
@@ -471,30 +522,39 @@ describe("signature on send (SCRUM-278)", () => {
     expect(b.calls[0]).toMatchObject({ resource: "users.settings.sendAs" });
   });
 
-  it("gmail_reply sends a signed plain note as HTML so it lands above the quote", async () => {
-    const { client, calls } = fakeClient([withSig(), sent]);
+  it("a signed plain reply keeps its plain part AND signs only the HTML one", async () => {
+    // This is the bug the live smoke found: the CLI helper turned this exact
+    // call into single-part text/html and the plain alternative vanished.
+    const { client, calls } = fakeClient([withSig(), ORIGINAL, sent]);
     const res = await handleGmail(client, "gmail_reply", { message_id: "m0", body: "my reply" });
-    const flags = calls[1].flags as Record<string, unknown>;
-    expect(flags.html).toBe(true);
-    expect(flags.body).toContain("my reply");
-    expect(flags.body).toContain('class="gmail_signature"');
+    const mime = rawMime(calls[2]);
+    expect(mime).toContain("multipart/alternative");
+    const [plainPart, htmlPart] = mime.split("Content-Type: text/html");
+    expect(plainPart).toContain("my reply");
+    expect(plainPart).not.toContain("gmail_signature");
+    expect(htmlPart).toContain('class="gmail_signature"');
     expect(payload(res).signature).toBe("applied");
   });
 
+  it("the signature sits ABOVE the quote in a reply", async () => {
+    const { client, calls } = fakeClient([withSig(), ORIGINAL, sent]);
+    await handleGmail(client, "gmail_reply", { message_id: "m0", body: "my reply" });
+    const mime = rawMime(calls[2]);
+    expect(mime.indexOf("gmail_signature")).toBeLessThan(mime.indexOf("gmail_quote"));
+  });
+
   it("gmail_reply keeps an html_body reply as HTML and appends the signature", async () => {
-    const { client, calls } = fakeClient([withSig(), sent]);
+    const { client, calls } = fakeClient([withSig(), ORIGINAL, sent]);
     await handleGmail(client, "gmail_reply", { message_id: "m0", html_body: "<b>rich</b>" });
-    const flags = calls[1].flags as Record<string, unknown>;
-    expect(flags.body).toContain("<b>rich</b>");
-    expect(flags.body).toContain(SIG);
+    const mime = rawMime(calls[2]);
+    expect(mime).toContain("<b>rich</b>");
+    expect(mime).toContain(SIG);
   });
 
   it("gmail_forward with no note sends the signature as the note", async () => {
-    const { client, calls } = fakeClient([withSig(), sent]);
+    const { client, calls } = fakeClient([withSig(), ORIGINAL, sent]);
     await handleGmail(client, "gmail_forward", { message_id: "m0", to: "b@c.d" });
-    const flags = calls[1].flags as Record<string, unknown>;
-    expect(flags.html).toBe(true);
-    expect(flags.body).toContain(SIG);
+    expect(rawMime(calls[2])).toContain(SIG);
   });
 
   it("the draft tools never touch the signature", async () => {
@@ -753,17 +813,19 @@ describe("a large adversarial html_body does not stall the loop", () => {
   // reach any of this.
   const evil = "<div ".repeat(Math.ceil((128 * 1024) / 5));
 
-  it("gmail_reply does not flatten the caller's markup at all", async () => {
-    const { client, calls } = fakeClient([withSig, { data: { id: "m1" } }]);
+  it("gmail_reply survives adversarial markup now that it derives a plain part", async () => {
+    // Composing the reply here means the flattener is newly on this path, so
+    // this guard matters MORE than it did when the CLI helper owned the send.
+    const { client, calls } = fakeClient([withSig, ORIGINAL, { data: { id: "m1" } }]);
     const started = Date.now();
     await handleGmail(client, "gmail_reply", { message_id: "m0", html_body: evil });
     expect(Date.now() - started).toBeLessThan(1000);
-    // and what goes out is the caller's markup plus the signature
-    expect(calls[1].flags).toMatchObject({ html: true });
+    // the caller's markup still travels intact in the HTML part
+    expect(rawMime(calls[2])).toContain("multipart/alternative");
   });
 
-  it("gmail_forward does not flatten the caller's markup at all", async () => {
-    const { client } = fakeClient([withSig, { data: { id: "m1" } }]);
+  it("gmail_forward survives adversarial markup too", async () => {
+    const { client } = fakeClient([withSig, ORIGINAL, { data: { id: "m1" } }]);
     const started = Date.now();
     await handleGmail(client, "gmail_forward", {
       message_id: "m0",
@@ -771,5 +833,38 @@ describe("a large adversarial html_body does not stall the loop", () => {
       html_body: evil,
     });
     expect(Date.now() - started).toBeLessThan(1000);
+  });
+});
+
+describe("header injection through the CALLER's arguments (gate finding)", () => {
+  // gmail_send has always rejected a line break in to/subject/cc/bcc via
+  // assertHeadersSingleLine. Composing reply and forward here put them on the
+  // same raw path WITHOUT that guard, so input gmail_send refuses outright was
+  // being injected into the header block by gmail_forward. encodeAddressHeader
+  // is no defence: it returns a CRLF value verbatim.
+  const evilTo = "victim@example.com\r\nBcc: attacker@example.com";
+
+  it("gmail_forward REFUSES a line break in to, as gmail_send does", async () => {
+    const { client, calls } = fakeClient([]);
+    await expect(
+      handleGmail(client, "gmail_forward", { message_id: "m1", to: evilTo })
+    ).rejects.toThrow("to must not contain a line break");
+    // and it costs no API call, so a malformed argument never reaches Google
+    expect(calls).toHaveLength(0);
+  });
+
+  it("gmail_reply REFUSES a line break in its arguments too", async () => {
+    const { client, calls } = fakeClient([]);
+    await expect(
+      handleGmail(client, "gmail_reply", { message_id: "m1", body: "x", subject: evilTo })
+    ).rejects.toThrow("must not contain a line break");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("gmail_send still refuses it, the control for the two above", async () => {
+    const { client } = fakeClient([]);
+    await expect(
+      handleGmail(client, "gmail_send", { to: evilTo, subject: "Hi", body: "x" })
+    ).rejects.toThrow("to must not contain a line break");
   });
 });
