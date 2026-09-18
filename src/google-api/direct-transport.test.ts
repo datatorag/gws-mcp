@@ -221,3 +221,79 @@ describe("response handling matches what callers were written against", () => {
     expect(out.data).toEqual({ items: [1] });
   });
 });
+
+describe("one response cannot exhaust the process every session shares", () => {
+  const big = (bytes: number, withLength: boolean) => {
+    let sent = 0;
+    const pulled = { chunks: 0 };
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (sent >= bytes) return controller.close();
+        pulled.chunks++;
+        sent += 1 << 20;
+        controller.enqueue(new Uint8Array(1 << 20));
+      },
+    });
+    const res = new Response(stream, { status: 200, headers: withLength ? { "content-length": String(bytes) } : {} });
+    return { res, pulled };
+  };
+
+  it("refuses a declared oversize body without reading it", async () => {
+    const { res, pulled } = big(400 << 20, true);
+    withFetch(() => res);
+    await expect(
+      new GwsClient({ accessToken: TOKEN }).api("drive", "files", "get", { params: { fileId: "f", alt: "media" } })
+    ).rejects.toThrow(/larger than 10485760 bytes/);
+    expect(pulled.chunks).toBeLessThanOrEqual(1);
+  });
+
+  it("stops reading an undeclared oversize body just past the cap, not at its end", async () => {
+    const { res, pulled } = big(400 << 20, false);
+    withFetch(() => res);
+    await expect(new GwsClient({ accessToken: TOKEN }).api("tasks", "tasklists", "list")).rejects.toThrow(/larger than/);
+    expect(pulled.chunks).toBeLessThan(15);
+  });
+
+  it("a body at the cap still reads", async () => {
+    const body = JSON.stringify({ pad: "x".repeat(10 * 1024 * 1024 - 10) });
+    withFetch(() => new Response(body, { status: 200 }));
+    const out = await new GwsClient({ accessToken: TOKEN }).api("tasks", "tasklists", "list");
+    expect((out.data as { pad: string }).pad.length).toBe(10 * 1024 * 1024 - 10);
+  });
+});
+
+describe("a path value cannot leave its method's path", () => {
+  it.each([
+    ["people", "people", "get", { resourceName: "../../gmail/v1/users/me/messages", personFields: "names" }],
+    ["people", "people", "get", { resourceName: "people/../../x", personFields: "names" }],
+    ["drive", "files", "get", { fileId: ".." }],
+    ["gmail", "users.messages", "list", { userId: ".." }],
+    ["gmail", "users.messages", "get", { userId: "me", id: "." }],
+  ])("%s %s %s refuses a dot segment before any request", async (service, resource, method, params) => {
+    const requests = withFetch(() => json({}));
+    await expect(new GwsClient({ accessToken: TOKEN }).api(service, resource, method, { params })).rejects.toThrow(
+      /must not contain a "\." or "\.\." segment/
+    );
+    expect(requests).toHaveLength(0);
+  });
+
+  it("still lets dots that are not a whole segment through, encoded", async () => {
+    const requests = withFetch(() => json({}));
+    await new GwsClient({ accessToken: TOKEN }).api("people", "people", "get", {
+      resourceName: undefined,
+      params: { resourceName: "people/c1.2..3", personFields: "names" },
+    } as never);
+    expect(new URL(requests[0].url).pathname).toBe("/v1/people/c1%2E2%2E%2E3");
+  });
+});
+
+describe("the error code echoed from a network failure is only ever a code", () => {
+  it("drops a code that does not look like one, even if it carries the token", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
+      throw Object.assign(new TypeError("fetch failed"), { cause: { code: `Bearer ${TOKEN}` } });
+    });
+    const err = (await new GwsClient({ accessToken: TOKEN }).api("tasks", "tasklists", "list").catch((e: Error) => e)) as Error;
+    expect(err.message).not.toContain(TOKEN);
+    expect(err.message).toContain("network error");
+  });
+});

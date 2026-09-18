@@ -89,6 +89,13 @@ export function buildRequest(
     if (value === undefined || value === null || value === "") {
       throw new Error(`Validation error: missing required path parameter "${name}" for ${service} ${resource} ${method}.`);
     }
+    // A dot segment is refused, not encoded. `.` goes out as %2E, and URL
+    // parsing treats %2E%2E exactly like `..`, so an id of "../../x" would
+    // leave this method's path for another on the same host, under a tool
+    // name that says otherwise. No real id is a dot segment.
+    if (String(value).split("/").some((segment) => segment === "." || segment === "..")) {
+      throw new Error(`Validation error: path parameter "${name}" must not contain a "." or ".." segment.`);
+    }
     return plus ? encodeReserved(String(value)) : encodeSegment(String(value));
   });
   // An upload path is rooted at the host, not at the service path.
@@ -108,9 +115,15 @@ export function buildRequest(
   }
   queryParams.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
 
+  // Belt to the braces above: whatever was built must parse back to itself.
+  const built = `${base}${path}`;
+  if (new URL(built).href !== built) {
+    throw new Error(`Validation error: ${service} ${resource} ${method} built a path that does not survive URL parsing.`);
+  }
+
   return {
     method: entry.httpMethod,
-    url: `${base}${path}`,
+    url: built,
     queryParams,
     body: options?.jsonBody ?? null,
     isUpload: options?.upload === true,

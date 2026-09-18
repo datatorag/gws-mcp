@@ -108,6 +108,23 @@ describe("directUpload", () => {
     expect(urls.every((u) => u.startsWith("https://www.googleapis.com/"))).toBe(true);
   });
 
+  it.each([
+    "https://www.googleapis.com:8443/upload/x?upload_id=1",
+    "https://user:pw@www.googleapis.com/upload/x?upload_id=1",
+    "https://www.googleapis.com@evil.example/upload",
+    "https://evilgoogleapis.com/upload",
+    "http://www.googleapis.com/upload/x",
+    "https://www.googleapis.com./upload/x",
+  ])("refuses the session URL %s", async (location) => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response("", { status: 200, headers: { Location: location } }));
+    await expect(
+      directUpload(TOKEN, "drive", "files", "create", {
+        contentType: "application/octet-stream",
+        source: chunks(RESUMABLE_THRESHOLD + 1, 1 << 20),
+      })
+    ).rejects.toThrow(/non-Google URL/);
+  });
+
   it("a refused chunk surfaces as the API error, not as a silent success", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) =>
       init?.method === "POST"

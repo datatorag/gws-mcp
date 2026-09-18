@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import {
   DEFAULT_TIMEOUT_MS,
   directApi,
+  readCapped,
   sendAuthorized,
   throwApiError,
   type ApiOptions,
@@ -147,7 +148,7 @@ export class GwsClient {
       signal: AbortSignal.timeout(options?.timeout ?? 30_000),
       redirect: "manual",
     });
-    return { status: res.status, text: await res.text() };
+    return { status: res.status, text: await readCapped(res, "fetchText") };
   }
 
   async api(service: string, resource: string, method: string, options?: ApiOptions): Promise<GwsResult> {
@@ -176,7 +177,7 @@ export class GwsClient {
     const res = await sendAuthorized(token, { method: request.method, url: requestUrl(request) }, label, {
       timeout: DEFAULT_TIMEOUT_MS * 4,
     });
-    if (!res.ok) throwApiError(res.status, await res.text());
+    if (!res.ok) throwApiError(res.status, await readCapped(res, label));
     if (!res.body) throw new Error("No attachment data returned from Gmail API");
 
     return directUpload(token, "drive", "files", "create", {

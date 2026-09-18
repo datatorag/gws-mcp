@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { buildRequest, requestUrl } from "./request.js";
-import { MEDIA_TIMEOUT_MS, parseBody, sendAuthorized, throwApiError, type ApiResult } from "./direct-transport.js";
+import { MEDIA_TIMEOUT_MS, parseBody, readCapped, sendAuthorized, throwApiError, type ApiResult } from "./direct-transport.js";
 
 /** Below this the media goes up in one multipart request; above it, as a
  * resumable session in fixed chunks. The chunk is the most this path ever
@@ -69,7 +69,7 @@ export async function directUpload(
       label,
       { body, headers: { "Content-Type": `multipart/related; boundary=${boundary}` }, timeout: MEDIA_TIMEOUT_MS }
     );
-    const text = await res.text();
+    const text = await readCapped(res, label);
     if (!res.ok) throwApiError(res.status, text);
     return { success: true, data: parseBody(text) };
   }
@@ -85,7 +85,7 @@ export async function directUpload(
     headers: { "Content-Type": "application/json; charset=UTF-8", "X-Upload-Content-Type": options.contentType },
     timeout: MEDIA_TIMEOUT_MS,
   });
-  if (!open.ok) throwApiError(open.status, await open.text());
+  if (!open.ok) throwApiError(open.status, await readCapped(open, label));
   const session = open.headers.get("location");
   if (!session) throw new Error(`${label}: Google opened no upload session.`);
 
@@ -105,11 +105,11 @@ export async function directUpload(
     });
     offset = end;
     if (last) {
-      const text = await res.text();
+      const text = await readCapped(res, label);
       if (!res.ok) throwApiError(res.status, text);
       return { success: true, data: parseBody(text) };
     }
-    if (res.status !== 308) throwApiError(res.status, await res.text());
+    if (res.status !== 308) throwApiError(res.status, await readCapped(res, label));
     await res.arrayBuffer();
   }
 }
