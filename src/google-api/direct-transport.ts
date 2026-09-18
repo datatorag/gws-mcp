@@ -22,7 +22,7 @@ export async function readCapped(res: Response, label: string, limit = MAX_RESPO
   const declared = Number(res.headers.get("content-length"));
   const tooLarge = () =>
     new Error(
-      `${label}: the response is larger than ${limit} bytes, the most one call may return. ` +
+      `${label}: the response is larger than ${MAX_RESPONSE_BYTES} bytes, the most one call may return. ` +
         `Ask for less (fields, a narrower range, fewer results per page).`
     );
   if (Number.isFinite(declared) && declared > limit) {
@@ -201,35 +201,45 @@ export async function directApi(
   }
 
   const hasBody = options?.jsonBody !== undefined && options?.jsonBody !== null;
-  const once = async (extraQuery?: Array<[string, string]>) => {
+  const once = async (limit: number, extraQuery?: Array<[string, string]>) => {
     const res = await send(token, request, label, {
       body: hasBody ? JSON.stringify(options?.jsonBody) : undefined,
       headers: hasBody ? { "Content-Type": "application/json" } : undefined,
       timeout: options?.pageAll ? PAGE_ALL_TIMEOUT_MS : DEFAULT_TIMEOUT_MS,
       extraQuery,
     });
-    const text = await readCapped(res, label);
+    const text = await readCapped(res, label, limit);
     if (!res.ok) throwApiError(res.status, text);
     return text;
   };
 
-  if (!options?.pageAll) return { success: true, data: parseBody(await once()) };
+  if (!options?.pageAll) return { success: true, data: parseBody(await once(MAX_RESPONSE_BYTES)) };
 
   // One JSON document per page, newline separated, which is what --page-all
   // printed; a single page parses as plain JSON, as it did then.
+  //
+  // THE BUDGET IS FOR THE CALL, NOT THE PAGE. The old transport held every
+  // page under one buffer; a per-page cap here would quietly be ten times
+  // that. Each page is read against what is left, so the call fails with the
+  // same error the moment the pages together pass the bound. Each page is
+  // parsed once and re-serialised once, onto one line: Google pretty-prints,
+  // and a line-per-document format cannot carry a document with newlines.
   const pages: string[] = [];
+  let remaining = MAX_RESPONSE_BYTES;
   let pageToken: string | undefined;
   for (let i = 0; i < PAGE_ALL_LIMIT; i++) {
-    const text = await once(pageToken ? [["pageToken", pageToken]] : undefined);
-    pages.push(text.trim());
-    const next = (parseBody(text) as { nextPageToken?: unknown } | undefined)?.nextPageToken;
-    if (typeof next !== "string" || next === "") break;
+    const text = (await once(remaining, pageToken ? [["pageToken", pageToken]] : undefined)).trim();
+    remaining -= Buffer.byteLength(text, "utf8");
+    const parsed = parseBody(text);
+    pages.push(JSON.stringify(parsed));
+    const next = (parsed as { nextPageToken?: unknown } | undefined)?.nextPageToken;
+    if (typeof next !== "string" || next === "") {
+      if (pages.length === 1) return { success: true, data: parsed };
+      break;
+    }
     pageToken = next;
   }
-  return {
-    success: true,
-    data: pages.length === 1 ? parseBody(pages[0]) : pages.map((p) => JSON.stringify(parseBody(p))).join("\n"),
-  };
+  return { success: true, data: pages.join("\n") };
 }
 
 /** Open a media download (`alt=media`) and hand back the byte stream. */

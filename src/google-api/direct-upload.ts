@@ -110,7 +110,8 @@ export async function directUpload(
       return { success: true, data: parseBody(text) };
     }
     if (res.status !== 308) throwApiError(res.status, await readCapped(res, label));
-    await res.arrayBuffer();
+    // Nothing in an intermediate answer is needed; discard it unread.
+    await res.body?.cancel().catch(() => {});
   }
 }
 

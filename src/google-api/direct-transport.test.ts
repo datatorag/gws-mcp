@@ -262,6 +262,26 @@ describe("one response cannot exhaust the process every session shares", () => {
   });
 });
 
+describe("page_all shares one budget across its pages", () => {
+  it("fails the call once the pages together pass the bound, instead of holding ten times it", async () => {
+    const page = (n: number) => JSON.stringify({ n, pad: "x".repeat(3 * 1024 * 1024), nextPageToken: `p${n}` });
+    let n = 0;
+    const requests = withFetch(() => new Response(page(++n), { status: 200 }));
+    await expect(
+      new GwsClient({ accessToken: TOKEN }).api("drive", "files", "list", { pageAll: true })
+    ).rejects.toThrow(/larger than 10485760 bytes/);
+    // three pages fit, the fourth crosses; it never goes on to ten
+    expect(requests).toHaveLength(4);
+  });
+
+  it("pretty-printed pages still come back one document per line", async () => {
+    let n = 0;
+    withFetch(() => new Response(JSON.stringify({ n: ++n, ...(n < 3 ? { nextPageToken: `p${n}` } : {}) }, null, 2), { status: 200 }));
+    const out = await new GwsClient({ accessToken: TOKEN }).api("drive", "files", "list", { pageAll: true });
+    expect(String(out.data).split("\n").map((l) => JSON.parse(l).n)).toEqual([1, 2, 3]);
+  });
+});
+
 describe("a path value cannot leave its method's path", () => {
   it.each([
     ["people", "people", "get", { resourceName: "../../gmail/v1/users/me/messages", personFields: "names" }],
