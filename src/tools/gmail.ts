@@ -1,7 +1,4 @@
-import { writeFile, unlink } from "node:fs/promises";
 import { CREATE, MUTATE, READ, ToolDef } from "./annotations.js";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import type { GwsClient } from "../gws-client.js";
 import { deleteResponse, jsonResponse, stripHtml, truncate } from "./response.js";
@@ -13,7 +10,6 @@ import {
   type SignatureState,
 } from "./gmail-signature.js";
 import { draftFromHeader, signDraftRaw } from "./gmail-draft-send.js";
-import { argvStringFits } from "../gws-client.js";
 import { encodeAddressHeader, encodeHeaderValue } from "./mime-headers.js";
 import {
   addressOnly,
@@ -926,8 +922,8 @@ async function signSingleSlotBody(
 /** Send a draft, signing the MIME Gmail already stored for it.
  *
  * Nothing here may cost the user their send. A shape we will not rewrite, a
- * signature we cannot read, or a rewrite that no longer fits in one argv
- * string all fall through to sending the draft exactly as it stands, with the
+ * signature we cannot read, or a draft too large to rewrite on a shared
+ * event loop all fall through to sending the draft exactly as it stands, with the
  * reason in the response. If the update lands and the send then fails, a
  * retry finds the signature already there and does not add a second one. */
 async function sendDraft(client: GwsClient, args: Record<string, unknown>) {
@@ -977,9 +973,6 @@ async function sendDraft(client: GwsClient, args: Record<string, unknown>) {
 
   const updateBody: Record<string, unknown> = { raw: rewritten.raw };
   if (message.threadId) updateBody.threadId = message.threadId;
-  if (!argvStringFits(JSON.stringify({ message: updateBody }))) {
-    return send("skipped_unsupported_draft");
-  }
 
   try {
     await client.api("gmail", "users.drafts", "update", {
@@ -1161,48 +1154,15 @@ export async function handleGmail(
       });
 
     case "gmail_save_attachment_to_drive": {
-      // 1. Fetch attachment data from Gmail (stays in Node.js memory)
-      const attachResult = await client.api(
-        "gmail",
-        "users.messages.attachments",
-        "get",
-        {
-          params: {
-            userId: "me",
-            messageId: args.message_id,
-            id: args.attachment_id,
-          },
-        }
-      );
-      const attachData = attachResult.data as { data?: string; size?: number };
-      if (!attachData?.data) {
-        throw new Error("No attachment data returned from Gmail API");
-      }
-
-      // 2. Decode base64url to temp file
-      const tmpFile = join(tmpdir(), `gws-attach-${randomUUID()}`);
-      try {
-        const buf = Buffer.from(attachData.data, "base64url");
-        await writeFile(tmpFile, buf);
-
-        // 3. Upload to Drive via gws CLI helper
-        const flags: Record<string, string> = { name: args.filename as string };
-        if (args.parent_folder_id) {
-          flags.parent = args.parent_folder_id as string;
-        }
-        const uploadResult = await client.helper("drive", "upload", flags, {
-          positional: [tmpFile],
-          timeout: 120_000,
-        });
-        return jsonResponse(uploadResult.data);
-      } finally {
-        // 4. Clean up temp file
-        try {
-          await unlink(tmpFile);
-        } catch {
-          // ignore cleanup errors
-        }
-      }
+      // The transport owns how the bytes move: decoded as they stream in and
+      // uploaded in bounded chunks, never through the conversation.
+      const uploaded = await client.gmailAttachmentToDrive({
+        messageId: args.message_id as string,
+        attachmentId: args.attachment_id as string,
+        name: args.filename as string,
+        parent: args.parent_folder_id as string | undefined,
+      });
+      return jsonResponse(uploaded.data);
     }
 
     case "gmail_create_draft": {

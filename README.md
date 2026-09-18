@@ -147,6 +147,7 @@ Open `.env` and fill in your Client ID and Client Secret from the previous step.
 
 ```bash
 pnpm install
+pnpm run download-binaries   # the gws CLI: a self-hosted install logs in through it
 pnpm run build
 pnpm run build:extension
 ```
@@ -169,8 +170,13 @@ When the extension loads for the first time, a browser window opens automaticall
 
 ```bash
 pnpm install
+pnpm run download-binaries   # the gws CLI: a self-hosted install logs in through it
 pnpm run build
 ```
+
+`build` compiles TypeScript only. The `gws` binaries are opt-in: a deployment
+that receives a per-user token from a gateway (the `X-User-Token` header) calls
+the Google APIs directly and never runs the CLI, so it does not need them.
 
 ### 3. Authenticate
 
@@ -222,7 +228,15 @@ src/
 ├── create-server.ts      # Shared MCP server factory (accepts optional per-session client)
 ├── extension.ts          # Stdio entry point (.mcpb extension, auto-auth on startup)
 ├── index.ts              # HTTP entry point (StreamableHTTP, /health + /mcp endpoints)
-├── gws-client.ts         # Wrapper around the gws CLI binary, DEFAULT_SERVICES constant
+├── gws-client.ts         # The client every tool calls; picks the transport by whether it holds a token
+├── cli-transport.ts      # Fallback: the gws CLI, for self-hosted calls with no token, and the login flow
+├── scopes.ts             # DEFAULT_SERVICES and the per-service OAuth scopes
+├── google-api/
+│   ├── method-table.ts   # GENERATED from Google's Discovery documents (scripts/generate-method-table.mjs)
+│   ├── request.ts        # (service, resource, method, params) -> verb, URL, query, body
+│   ├── direct-transport.ts # fetch against the REST endpoints, error and paging shapes
+│   ├── direct-upload.ts  # Media upload (multipart, or resumable in bounded chunks), streaming attachment decode
+│   └── oracle.test.ts    # Holds the request builder equal to the pinned CLI's --dry-run for every method
 └── tools/
     ├── response.ts       # Response helpers (JSON formatting, 900KB truncation)
     ├── auth.ts           # OAuth login (browser-based, no gcloud needed)
@@ -240,17 +254,21 @@ src/
     └── index.ts          # Tool registry (flat Map<name, handler>)
 ```
 
-The server wraps the [`gws` CLI](https://github.com/googleworkspace/cli) binary, which handles OAuth token management and API discovery. Each tool either uses `client.helper()` for high-level CLI commands or `client.api()` for direct Google API calls.
+Every tool calls `client.api(service, resource, method, { params, jsonBody })`. How that call travels depends on one fact. **With a bearer token** (every gateway-hosted call, via `X-User-Token`), it is a `fetch` to the Google REST endpoint, built from a method table generated from Google's Discovery documents; no process is spawned and the CLI is never loaded. **Without one** (a self-hosted install), it falls back to the [`gws` CLI](https://github.com/googleworkspace/cli), which holds the credentials from its own `auth login`. The fallback lives in one module and goes away when a native OAuth flow replaces the CLI login.
+
+The token travels in the `Authorization` header only: never in a URL, a log line or an error. Requests go only to `*.googleapis.com`, redirects are refused, and a resumable upload's session URL is checked against the same rule before anything is sent to it.
+
+To refresh the method table after Google changes an API: `node scripts/generate-method-table.mjs`, then `pnpm test` (the oracle needs `pnpm run download-binaries`).
 
 The extension (`extension.ts`) runs via stdio for Claude Desktop `.mcpb` bundles. The HTTP server (`index.ts`) runs as a standalone process for Claude Code or other MCP clients. Both share the same `createMcpServer()` factory.
 
 ### Key implementation details
 
 - **Shared Drive support**: All Drive API calls include `supportsAllDrives: true` (and `includeItemsFromAllDrives: true` for list operations) so files on team Drives are accessible
-- **Sandbox compatibility**: Sets `cwd: os.tmpdir()` and `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` for Claude Desktop's read-only filesystem
+- **Sandbox compatibility** (CLI fallback): Sets `cwd: os.tmpdir()` and `GOOGLE_WORKSPACE_CLI_CONFIG_DIR` for Claude Desktop's read-only filesystem
 - **OAuth credentials**: Reads from env vars, falls back to bundled `oauth.json` (injected at build time by `scripts/build-extension.sh`)
 - **Auto-auth**: Extension checks auth status and scope coverage on startup, opens browser for OAuth login if needed (non-blocking — MCP server starts immediately)
-- **X-User-Token support**: HTTP server accepts `X-User-Token` header to create per-session clients with pre-obtained access tokens (via `GOOGLE_WORKSPACE_CLI_TOKEN` env var)
+- **X-User-Token support**: HTTP server accepts `X-User-Token` header to create per-session clients with pre-obtained access tokens; those clients call Google directly
 - **Response truncation**: All responses capped at 900KB to stay within context limits
 - **Context optimization**: docs_get, slides_get, and sheets_read aggressively strip metadata to minimize context usage. docs_get text mode reduces ~50KB API responses to ~2-3KB. slides_get strips masters/layouts/geometry/styling. sheets_read uses the values-only API endpoint.
 - **Inline image metadata**: docs_get includes `inlineObjects` map with image metadata (contentUri, size, margins) without embedding actual image bytes

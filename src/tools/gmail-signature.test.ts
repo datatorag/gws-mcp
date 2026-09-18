@@ -130,9 +130,10 @@ describe("the quoted-original search", () => {
     expect(insertBeforeHtmlQuote(`<span class="gmail_quote">old</span>`, SIG)).toBeUndefined();
   });
 
-  // Sized at the argv ceiling: the largest body that can reach this at all,
-  // and small enough that a quadratic form reddens the case in seconds rather
-  // than minutes, so the mutation stays runnable.
+  // Sized so a quadratic form reddens the case in seconds rather than
+  // minutes, which keeps the mutation runnable. It was once also the largest
+  // body that could arrive; nothing caps that now, and the send-path test in
+  // gmail-send.test.ts covers megabytes.
   it("does not stall on a large body whose tags never close", () => {
     const started = Date.now();
     expect(insertBeforeHtmlQuote(unclosed(128), SIG)).toBeUndefined();

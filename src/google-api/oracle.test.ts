@@ -102,6 +102,14 @@ function toolTuples(): string[] {
       found.add(`${m[1]} ${m[2]}.${m[3]}`);
     }
   }
+  // The client itself addresses a few methods by name for the media paths
+  // (the attachment read, the Drive upload). They count too.
+  const clientSource = readFileSync(path.join(root, "src", "gws-client.ts"), "utf8");
+  for (const m of clientSource.matchAll(
+    /(?:buildRequest\(|directUpload\(\s*token,)\s*"([^"]+)"\s*,\s*"([^"]+)"\s*,\s*"([^"]+)"/g
+  )) {
+    found.add(`${m[1]} ${m[2]}.${m[3]}`);
+  }
   // Exactly one call site is allowed to be dynamic: gws_run, which forwards
   // the caller's own names. A second one would be a tuple this test cannot
   // see, so it fails here rather than passing quietly.

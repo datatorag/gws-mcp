@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import { argvStringFits } from "../gws-client.js";
 import {
   appendHtmlSignature,
   insertBeforeHtmlQuote,
@@ -16,6 +15,9 @@ export interface DraftSignResult {
 }
 
 const UNSUPPORTED: DraftSignResult = { state: "skipped_unsupported_draft" };
+
+/** The largest stored draft, in base64url characters, this will rewrite. */
+export const DRAFT_SIGN_MAX_CHARS = 1024 * 1024;
 
 /** Soft-wrap width for quoted-printable. RFC 2045 allows 76 including the
  * trailing "=", and a wrapped line can grow by two characters when the break
@@ -276,12 +278,13 @@ interface Part {
  * cannot re-emit — is reported `skipped_unsupported_draft` and sent exactly
  * as the user wrote it. */
 export function signDraftRaw(rawB64: string, sig: Signature): DraftSignResult {
-  // Checked FIRST, not after the rewrite. Signing only ever grows the message,
-  // so a draft that already exceeds the argv budget is certain to be rejected
-  // downstream — and decoding, rewriting and re-encoding it first costs
-  // hundreds of ms of un-yielding event loop, which on a process that serves
-  // every session from one loop is everyone's stall for a guaranteed refusal.
-  if (!argvStringFits(rawB64)) return UNSUPPORTED;
+  // Checked FIRST, not after the rewrite. Decoding, rewriting and re-encoding
+  // a message is un-yielding work on an event loop every session shares, so a
+  // draft past this size is sent as it stands. A text draft is nowhere near
+  // it; what is, is a draft holding attachments, which this does not rewrite
+  // anyway. (This used to be the transport's one-argv-string limit. That limit
+  // left with the CLI transport; the reason to bound the work did not.)
+  if (rawB64.length > DRAFT_SIGN_MAX_CHARS) return UNSUPPORTED;
 
   const bytes = Buffer.from(rawB64, "base64url");
   const message = bytes.toString("utf8");

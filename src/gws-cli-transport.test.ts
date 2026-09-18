@@ -17,7 +17,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { GwsClient } from "./gws-client.js";
+import { CliTransport } from "./cli-transport.js";
 
 const binDir = path.resolve(__dirname, "..", "bin");
 const binaryFor: Record<string, string> = {
@@ -42,18 +42,23 @@ function pairsFor(run: DryRun, key: string): string[] {
 
 describe.skipIf(!haveBinary)("the pinned gws binary sends a scalar array as a repeated query key", () => {
   let configDir = "";
-  let client: GwsClient;
+  let client: CliTransport;
 
   beforeAll(() => {
     // A private config dir so the binary neither reads nor writes the
     // machine's real one; --dry-run never contacts Google, and the token
     // is a placeholder the request is built around, not sent anywhere.
     configDir = mkdtempSync(path.join(os.tmpdir(), "gws-transport-"));
-    process.env.GOOGLE_WORKSPACE_CLI_CONFIG_DIR = configDir;
-    client = new GwsClient({ accessToken: "dry-run-placeholder" });
+    // Since SCRUM-289 a token-bearing GwsClient never reaches the binary, so
+    // the fallback transport is driven directly here. The oracle test holds
+    // the NEW client against this same binary for every method.
+    client = new CliTransport({
+      ...process.env,
+      GOOGLE_WORKSPACE_CLI_CONFIG_DIR: configDir,
+      GOOGLE_WORKSPACE_CLI_TOKEN: "dry-run-placeholder",
+    });
   });
   afterAll(() => {
-    delete process.env.GOOGLE_WORKSPACE_CLI_CONFIG_DIR;
     if (configDir) rmSync(configDir, { recursive: true, force: true });
   });
 

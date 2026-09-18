@@ -789,12 +789,29 @@ describe("gmail_send_draft signs the stored MIME (SCRUM-278)", () => {
     expect(out.indexOf("gmail_signature")).toBeLessThan(out.indexOf("gmail_quote"));
   });
 
-  it("sends the draft untouched when the rewrite would not fit in one argv string", async () => {
-    const huge = raw(
+  /* SCRUM-289: the one-argv-string limit belonged to the CLI transport and
+   * left with it, so a long text draft is signed like any other. What stays
+   * is a bound on the rewrite itself, which is un-yielding work on a shared
+   * event loop. */
+  it("signs a text draft that the old transport's argv limit used to skip", async () => {
+    const long = raw(
       "From: Dana Rivers <sender@example.com>",
       "Content-Type: text/plain; charset=UTF-8",
       "",
       "x".repeat(130_000)
+    );
+    const { client, calls } = fakeClient([draftGet(long), sendAs(), { data: {} }, { data: { id: "m1" } }]);
+    const res = await handleGmail(client, "gmail_send_draft", { draft_id: "d1" });
+    expect(calls.map((c) => c.method)).toEqual(["get", "list", "update", "send"]);
+    expect(payload(res).signature).toBe("applied");
+  });
+
+  it("sends a draft past the rewrite bound untouched, without decoding it", async () => {
+    const huge = raw(
+      "From: Dana Rivers <sender@example.com>",
+      "Content-Type: text/plain; charset=UTF-8",
+      "",
+      "x".repeat(800_000)
     );
     const { client, calls } = fakeClient([draftGet(huge), sendAs(), { data: { id: "m1" } }]);
     const res = await handleGmail(client, "gmail_send_draft", { draft_id: "d1" });
@@ -804,14 +821,15 @@ describe("gmail_send_draft signs the stored MIME (SCRUM-278)", () => {
 });
 
 /* The plugin serves every session from one event loop, so work done on a
- * caller's uncapped html_body is every tenant's problem. Nothing upstream
- * caps an inbound body — the argv guard is downstream of this. */
+ * caller's html_body is every tenant's problem. Nothing caps an inbound body
+ * any more: the old transport's one-argv-string limit used to, by accident,
+ * and it left with that transport (SCRUM-289). So these are sized well past
+ * it, at megabytes, which is what can now arrive. */
 describe("a large adversarial html_body does not stall the loop", () => {
   const withSig = { data: { sendAs: [{ isDefault: true, signature: "<div>Sig</div>" }] } };
   // Markup with many '<' and no '>' is the shape that makes a tag-stripping
-  // scan superlinear. Sized at the argv ceiling: the largest body that can
-  // reach any of this.
-  const evil = "<div ".repeat(Math.ceil((128 * 1024) / 5));
+  // scan superlinear; the cost scales with the NUMBER of unclosed tag starts.
+  const evil = "<div ".repeat(1_000_000);
 
   it("gmail_reply survives adversarial markup now that it derives a plain part", async () => {
     // Composing the reply here means the flattener is newly on this path, so
