@@ -14,11 +14,13 @@ import {
 } from "./gmail-signature.js";
 import { draftFromHeader, signDraftRaw } from "./gmail-draft-send.js";
 import { argvStringFits } from "../gws-client.js";
-import { encodeAddressHeader, encodeHeaderValue, isAscii } from "./mime-headers.js";
+import { encodeAddressHeader, encodeHeaderValue } from "./mime-headers.js";
 import {
   addressOnly,
+  derivePlain,
   buildReplyBodies,
-  escapeHtml,
+  originalPlainText,
+  originalHtmlBody,
   forwardHtmlBlock,
   forwardPlainBlock,
   forwardSubject,
@@ -599,25 +601,41 @@ function resolveBody(
   return { body, html };
 }
 
-/** Flags for the CLI helpers with one body slot (+reply, +forward): either
- * --body <plain>, or --body <html> --html. Both at once is refused rather
- * than one silently dropped — a message sent with half its content missing
- * would be this ticket's silent failure wearing a new hat. */
-function htmlOrPlainBody(
+/** `gmail_reply` and `gmail_forward` have ONE body slot: either plain or HTML,
+ * never both. Both at once is refused rather than one silently dropped — a
+ * message sent with half its content missing would be this ticket's silent
+ * failure wearing a new hat.
+ *
+ * Was `htmlOrPlainBody`, which also returned CLI helper flags; nothing has
+ * consumed those since the send paths stopped using the helper, so it is now
+ * only the assertion its callers actually wanted. */
+/** Every argument contract error for the single-body-slot tools, raised
+ * SYNCHRONOUSLY so a caller can clear them before starting any request. That
+ * property used to hold because signing ran first; now the signature lookup
+ * and the original fetch are issued together, so it has to be asserted here
+ * or a bad call would cost an API call. */
+function assertBodyContract(
+  toolName: string,
+  args: Record<string, unknown>,
+  opts?: { requireBody?: boolean }
+): void {
+  assertSingleBodySlot(toolName, args);
+  if (opts?.requireBody && args.body === undefined && args.html_body === undefined) {
+    throw new Error(`${toolName}: provide body (plain text) or html_body (HTML).`);
+  }
+}
+
+function assertSingleBodySlot(
   toolName: string,
   args: Record<string, unknown>
-): Record<string, string | boolean> {
-  const body = args.body as string | undefined;
-  const html = args.html_body as string | undefined;
-  if (body !== undefined && html !== undefined) {
+): void {
+  if (args.body !== undefined && args.html_body !== undefined) {
     throw new Error(
       `${toolName}: provide body or html_body, not both. This path has a ` +
         "single body slot; a separate plain-text fallback is only supported " +
         "on gmail_send and the draft tools."
     );
   }
-  if (html !== undefined) return { body: html, html: true };
-  return body !== undefined ? { body } : {};
 }
 
 /** A header is ASCII or it is not a header (SCRUM-249): the subject and any
@@ -637,6 +655,67 @@ function assertHeadersSingleLine(args: Record<string, unknown>): void {
 
 /** `bodies` is passed in rather than read off `args` so the signature can be
  * applied to the RESOLVED body before any path branches (SCRUM-278). */
+/** The ONE place a header array becomes wire bytes.
+ *
+ * Folds any line break as it joins, so "no header line contains CR or LF" is a
+ * property of the assembly rather than of every producer remembering to check.
+ * The producers still reject a line break in the CALLER's own arguments
+ * (`assertHeadersSingleLine`) — that is an argument-contract error worth a
+ * clear message. This is the other half: attacker-supplied values copied out of
+ * an inbound message get folded here, so a header derived somewhere new cannot
+ * become an injection by being forgotten. */
+export function renderHeaders(lines: string[]): string {
+  return lines.map(foldUnlessContinuation).join("\r\n");
+}
+
+/** Fold every line break EXCEPT a legal RFC 2047/5322 continuation.
+ *
+ * `CRLF + SP|TAB` inside a header value is correct and wanted — it is how
+ * `encodeHeaderValue` wraps a long encoded subject, and it is the one place a
+ * CRLF in a header is not an injection. A blanket fold flattens those too,
+ * which silently unfolds long non-ASCII subjects past the line-length limit.
+ * The split captures the legal folds so only the gaps between them are
+ * folded. */
+function foldUnlessContinuation(line: string): string {
+  return line
+    .split(/(\r\n[ \t])/)
+    .map((piece, i) => (i % 2 === 1 ? piece : piece.replace(/[\r\n]+/g, " ")))
+    .join("");
+}
+
+/** multipart/alternative, plain part FIRST: clients prefer the last part they
+ * can render, so text/html must come after the fallback.
+ *
+ * The single owner of the wire shape — boundary token, part order, part
+ * headers — for every send path. */
+function renderMultipartAlternative(
+  headers: string[],
+  plain: string,
+  html: string
+): string {
+  const boundary = `=_gws_${randomUUID()}`;
+  const all = [
+    ...headers,
+    "MIME-Version: 1.0",
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+  ];
+  const content = [
+    `--${boundary}`,
+    "Content-Type: text/plain; charset=utf-8",
+    "",
+    plain,
+    `--${boundary}`,
+    "Content-Type: text/html; charset=utf-8",
+    "",
+    html,
+    `--${boundary}--`,
+    "",
+  ].join("\r\n");
+  return Buffer.from(`${renderHeaders(all)}\r\n\r\n${content}`).toString(
+    "base64url"
+  );
+}
+
 function buildRawMessage(
   toolName: string,
   args: Record<string, unknown>,
@@ -650,39 +729,20 @@ function buildRawMessage(
   ];
   if (args.cc) headers.push(`Cc: ${encodeAddressHeader(args.cc as string)}`);
   if (args.bcc) headers.push(`Bcc: ${encodeAddressHeader(args.bcc as string)}`);
-  headers.push("MIME-Version: 1.0");
 
-  let content: string;
-  if (html === undefined) {
-    headers.push("Content-Type: text/plain; charset=utf-8");
-    content = body as string;
-  } else {
-    // multipart/alternative with the plain part FIRST: clients prefer the
-    // last part they can render, so text/html must come after the fallback.
-    // The fallback is the caller's plain text when given, otherwise text
-    // derived from the HTML — never the raw markup, which is the exact
-    // failure this parameter exists to end.
-    const boundary = `=_gws_${randomUUID()}`;
-    headers.push(
-      `Content-Type: multipart/alternative; boundary="${boundary}"`
+  if (html !== undefined) {
+    // The plain fallback is the caller's text when given, otherwise text
+    // derived from the markup BEFORE the signature went in, so the plain part
+    // never carries it. Derived HERE and nowhere earlier, because this is the
+    // only place a plain part is actually built.
+    return renderMultipartAlternative(
+      headers,
+      body ?? derivePlain(bodies.unsignedHtml ?? html),
+      html
     );
-    content = [
-      `--${boundary}`,
-      "Content-Type: text/plain; charset=utf-8",
-      "",
-      // Derived from the markup BEFORE the signature, so the plain part never
-      // carries it. Derived HERE and nowhere earlier, because this is the only
-      // place a plain part is actually built.
-      body ?? stripHtml(bodies.unsignedHtml ?? html),
-      `--${boundary}`,
-      "Content-Type: text/html; charset=utf-8",
-      "",
-      html,
-      `--${boundary}--`,
-      "",
-    ].join("\r\n");
   }
-  return Buffer.from(`${headers.join("\r\n")}\r\n\r\n${content}`).toString(
+  headers.push("MIME-Version: 1.0", "Content-Type: text/plain; charset=utf-8");
+  return Buffer.from(`${renderHeaders(headers)}\r\n\r\n${body as string}`).toString(
     "base64url"
   );
 }
@@ -846,12 +906,7 @@ async function signSingleSlotBody(
   unsignedHtml?: string;
   state: SignatureState;
 }> {
-  // Both argument contract errors are raised BEFORE signing, so a bad call
-  // costs no API call and the error is never about something added here.
-  htmlOrPlainBody(toolName, args);
-  if (opts?.requireBody && args.body === undefined && args.html_body === undefined) {
-    throw new Error(`${toolName}: provide body (plain text) or html_body (HTML).`);
-  }
+  assertBodyContract(toolName, args, opts);
 
   const body = args.body as string | undefined;
   const html = args.html_body as string | undefined;
@@ -939,20 +994,6 @@ async function sendDraft(client: GwsClient, args: Record<string, unknown>) {
   return send("applied");
 }
 
-/** How much markup is flattened when a plain alternative has to be DERIVED.
- *
- * Deriving one means running the shared flattener over caller- or
- * sender-supplied markup. On this branch that flattener is still the quadratic
- * one (SCRUM-283 fixes it separately), and composing replies here newly puts
- * it on the reply and forward paths, so the input is bounded before it gets
- * there rather than after. Same guard the read path uses. */
-const PLAIN_DERIVE_MAX = 128 * 1024;
-
-function derivePlain(html: string): string {
-  if (html.length <= PLAIN_DERIVE_MAX) return stripHtml(html);
-  return `${stripHtml(html.slice(0, PLAIN_DERIVE_MAX))}\n…[truncated]`;
-}
-
 /** The original message a reply or forward is built from.
  *
  * Read through the API rather than left to the CLI helper: the helper accepts
@@ -968,9 +1009,7 @@ async function fetchOriginal(
     params: { userId: "me", id: messageId, format: "full" },
   });
   const message = result.data as GmailMessage;
-  const headers = message.payload?.headers ?? [];
-  const header = (name: string) =>
-    headers.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value ?? "";
+  const header = (name: string) => getHeader(message, name) ?? "";
   const decode = (mime: string) => {
     const part = findPart(message.payload, mime);
     return part?.body?.data
@@ -991,31 +1030,6 @@ async function fetchOriginal(
   };
 }
 
-/** multipart/alternative, plain part FIRST so clients that prefer the last
- * renderable part still choose the HTML. Identical shape to buildRawMessage's
- * multipart branch, which is the point: one MIME shape for every send path. */
-function buildAlternativeRaw(
-  headers: string[],
-  plain: string,
-  html: string
-): string {
-  const boundary = `=_gws_${randomUUID()}`;
-  const all = [...headers, "MIME-Version: 1.0", `Content-Type: multipart/alternative; boundary="${boundary}"`];
-  const content = [
-    `--${boundary}`,
-    "Content-Type: text/plain; charset=utf-8",
-    "",
-    plain,
-    `--${boundary}`,
-    "Content-Type: text/html; charset=utf-8",
-    "",
-    html,
-    `--${boundary}--`,
-    "",
-  ].join("\r\n");
-  return Buffer.from(`${all.join("\r\n")}\r\n\r\n${content}`).toString("base64url");
-}
-
 export async function handleGmail(
   client: GwsClient,
   toolName: string,
@@ -1024,33 +1038,14 @@ export async function handleGmail(
   switch (toolName) {
     case "gmail_send": {
       assertHeadersSingleLine(args);
-      // The signature is applied to the resolved body BEFORE the paths
-      // branch: a plain ASCII send goes through the CLI helper and never
-      // reaches buildRawMessage, so injecting further down would have missed
-      // the most common send there is.
+      // The signature is applied to the RESOLVED body, before anything builds
+      // MIME, so no send path can be reached without it having been offered.
       const signed = await applySignature(client, args, resolveBody(toolName, args));
-      const { body, html } = signed;
-      // A plain send with a non-ASCII subject or display name takes the raw
-      // path as well (SCRUM-249), so the header encoding is this module's on
-      // every route rather than left to the CLI's own MIME writer.
-      const needsEncoding = ["subject", "to", "cc", "bcc"].some(
-        (k) => typeof args[k] === "string" && !isAscii(args[k] as string)
-      );
-      if (html !== undefined || needsEncoding) {
-        // The CLI's +send --html emits a single text/html part with no
-        // fallback; the raw API path sends multipart/alternative instead,
-        // the same shape as the draft tools. A plain send carrying a
-        // signature arrives here too, so the signature's real markup travels
-        // rather than a flattened text copy.
-        const result = await client.api("gmail", "users.messages", "send", {
-          params: { userId: "me" },
-          jsonBody: { raw: buildRawMessage(toolName, args, signed) },
-        });
-        return sentResponse(result.data, signed.state);
-      }
-      // Every send now goes out as raw MIME we built. The CLI helper is no
-      // longer on any send path, so the wire shape no longer depends on which
-      // branch a call happened to take.
+      // Every send goes out as raw MIME built here. The gws CLI helper used to
+      // carry plain ASCII sends and emitted a single text/html part with no
+      // fallback once HTML was involved; it is off every send path now, so the
+      // wire shape no longer depends on which branch a call happened to take,
+      // and header encoding (SCRUM-249) is this module's on every route.
       const result = await client.api("gmail", "users.messages", "send", {
         params: { userId: "me" },
         jsonBody: { raw: buildRawMessage(toolName, args, signed) },
@@ -1063,21 +1058,23 @@ export async function handleGmail(
       // so it needs the same guard. encodeAddressHeader is NOT a defence: it
       // returns a value containing CRLF verbatim.
       assertHeadersSingleLine(args);
-      const signed = await signSingleSlotBody(client, toolName, args, {
-        requireBody: true,
-      });
-      const { original, threadId } = await fetchOriginal(
-        client,
-        args.message_id as string
-      );
+      assertBodyContract(toolName, args, { requireBody: true });
+      // Independent: the signature lookup reads the account's sendAs, the
+      // fetch reads the message being replied to, and neither needs the
+      // other's result. Issued together, they cost one round trip instead of
+      // two. Both contract asserts ran above, so a bad call still costs none.
+      const [signed, fetched] = await Promise.all([
+        signSingleSlotBody(client, toolName, args, { requireBody: true }),
+        fetchOriginal(client, args.message_id as string),
+      ]);
+      const { original, threadId } = fetched;
       const plainBody =
         (args.body as string | undefined) ??
         derivePlain(signed.unsignedHtml ?? (args.html_body as string) ?? "");
       const bodies = buildReplyBodies(
         original,
         plainBody,
-        signed.html ?? plainToHtml(plainBody),
-        derivePlain
+        signed.html ?? plainToHtml(plainBody)
       );
       const headers = [
         `To: ${encodeAddressHeader(addressOnly(original.from))}`,
@@ -1087,7 +1084,7 @@ export async function handleGmail(
       const result = await client.api("gmail", "users.messages", "send", {
         params: { userId: "me" },
         jsonBody: {
-          raw: buildAlternativeRaw(headers, bodies.plain, bodies.html),
+          raw: renderMultipartAlternative(headers, bodies.plain, bodies.html),
           ...(threadId ? { threadId } : {}),
         },
       });
@@ -1096,15 +1093,17 @@ export async function handleGmail(
 
     case "gmail_forward": {
       assertHeadersSingleLine(args);
-      const signed = await signSingleSlotBody(client, toolName, args);
-      const { original } = await fetchOriginal(client, args.message_id as string);
+      assertBodyContract(toolName, args);
+      const [signed, fetched] = await Promise.all([
+        signSingleSlotBody(client, toolName, args),
+        fetchOriginal(client, args.message_id as string),
+      ]);
+      const { original } = fetched;
       const to = args.to as string;
       const note = (args.body as string | undefined) ?? "";
       const noteHtml = signed.html ?? plainToHtml(note);
-      const originalPlain = original.plain ?? derivePlain(original.html ?? "");
-      const originalHtml =
-        original.html ??
-        `<div dir="ltr">${escapeHtml(original.plain ?? "").replace(/\r\n|\r|\n/g, "<br>")}</div>`;
+      const originalPlain = originalPlainText(original);
+      const originalHtml = originalHtmlBody(original);
       const headers = [
         `To: ${encodeAddressHeader(to)}`,
         `Subject: ${encodeHeaderValue(forwardSubject(original.subject))}`,
@@ -1113,7 +1112,7 @@ export async function handleGmail(
       const result = await client.api("gmail", "users.messages", "send", {
         params: { userId: "me" },
         jsonBody: {
-          raw: buildAlternativeRaw(
+          raw: renderMultipartAlternative(
             headers,
             [note, "", forwardPlainBlock(original, to, originalPlain)].join("\n"),
             `${noteHtml}<br>\n${forwardHtmlBlock(original, to, originalHtml)}`

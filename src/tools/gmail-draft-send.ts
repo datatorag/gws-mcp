@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { argvStringFits } from "../gws-client.js";
 import {
   appendHtmlSignature,
   insertBeforeHtmlQuote,
@@ -275,6 +276,13 @@ interface Part {
  * cannot re-emit — is reported `skipped_unsupported_draft` and sent exactly
  * as the user wrote it. */
 export function signDraftRaw(rawB64: string, sig: Signature): DraftSignResult {
+  // Checked FIRST, not after the rewrite. Signing only ever grows the message,
+  // so a draft that already exceeds the argv budget is certain to be rejected
+  // downstream — and decoding, rewriting and re-encoding it first costs
+  // hundreds of ms of un-yielding event loop, which on a process that serves
+  // every session from one loop is everyone's stall for a guaranteed refusal.
+  if (!argvStringFits(rawB64)) return UNSUPPORTED;
+
   const bytes = Buffer.from(rawB64, "base64url");
   const message = bytes.toString("utf8");
   // The whole message round-trips through a JS string, so a byte sequence that
@@ -374,8 +382,11 @@ export function signDraftRaw(rawB64: string, sig: Signature): DraftSignResult {
   const plainPart = parts[0];
   const plain = decodePart(message.slice(plainPart.start, plainPart.end), plainPart.cte);
   if (plain === undefined) return UNSUPPORTED;
-  if (signaturePresentInHtml(plainToHtml(plain), sig.text)) return { state: "already_present" };
-  const html = signHtmlBody(plainToHtml(plain), sig);
+  // Escaped once: the presence check and the signing below want the same
+  // string, and plainToHtml is five full-body regex passes.
+  const plainAsHtml = plainToHtml(plain);
+  if (signaturePresentInHtml(plainAsHtml, sig.text)) return { state: "already_present" };
+  const html = signHtmlBody(plainAsHtml, sig);
   const closing = bodyStart + delims[delims.length - 1];
   const added = [
     `--${boundary}`,

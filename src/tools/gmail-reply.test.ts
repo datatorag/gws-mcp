@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   addressOnly,
   buildReplyBodies,
+  derivePlain,
   escapeHtml,
   forwardPlainBlock,
   forwardSubject,
@@ -61,19 +62,19 @@ describe("the signature sits above the quote", () => {
   const signed = "Reply text<br clear=\"all\"><br clear=\"all\"><div><div class=\"gmail_signature\">SIG</div></div>";
 
   it("puts the whole signed body, signature included, before the quote", () => {
-    const { html } = buildReplyBodies(CLI_ORIGINAL, "Reply text", signed, (h) => h);
+    const { html } = buildReplyBodies(CLI_ORIGINAL, "Reply text", signed);
     expect(html.indexOf("gmail_signature")).toBeLessThan(html.indexOf("gmail_quote"));
   });
 
   it("never lets the signature reach the plain part", () => {
-    const { plain } = buildReplyBodies(CLI_ORIGINAL, "Reply text", signed, (h) => h);
+    const { plain } = buildReplyBodies(CLI_ORIGINAL, "Reply text", signed);
     expect(plain).not.toContain("gmail_signature");
     expect(plain).not.toContain("SIG");
     expect(plain.startsWith("Reply text\n\nOn Thu, 1 Jan 2026")).toBe(true);
   });
 
   it("builds BOTH parts, which is the whole point of the change", () => {
-    const { plain, html } = buildReplyBodies(CLI_ORIGINAL, "Reply text", signed, (h) => h);
+    const { plain, html } = buildReplyBodies(CLI_ORIGINAL, "Reply text", signed);
     expect(plain.length).toBeGreaterThan(0);
     expect(html.length).toBeGreaterThan(0);
   });
@@ -81,20 +82,32 @@ describe("the signature sits above the quote", () => {
 
 describe("the plain quote's source", () => {
   it("prefers the original's own text/plain part over flattening its HTML", () => {
-    const flatten = () => "FLATTENED";
-    expect(originalPlainText(CLI_ORIGINAL, flatten)).toBe("Original message body");
+    // The HTML here would flatten to something different, so a pass proves the
+    // plain part was preferred rather than that both happen to agree.
+    const differing = { ...CLI_ORIGINAL, html: "<p>NOT THIS</p>" };
+    expect(originalPlainText(differing)).toBe("Original message body");
   });
 
   it("flattens the HTML only when there is no plain part", () => {
-    const noPlain = { ...CLI_ORIGINAL, plain: undefined };
-    expect(originalPlainText(noPlain, () => "FLATTENED")).toBe("FLATTENED");
+    const noPlain = { ...CLI_ORIGINAL, plain: undefined, html: "<p>from the markup</p>" };
+    expect(originalPlainText(noPlain)).toBe("from the markup");
   });
 
   it("BOUNDS what it flattens, because the original is inbound mail", () => {
-    const noPlain = { ...CLI_ORIGINAL, plain: undefined, html: "x".repeat(2 * 1024 * 1024) };
-    let seen = 0;
-    originalPlainText(noPlain, (h) => { seen = h.length; return ""; });
-    expect(seen).toBe(512 * 1024);
+    // The bound now lives in derivePlain, which owns it for every path that
+    // has to derive a plain body. Asserted on the OUTPUT rather than on a
+    // spy's input, so it holds wherever the slicing happens.
+    const huge = "x".repeat(2 * 1024 * 1024);
+    const out = derivePlain(huge);
+    expect(out.length).toBeLessThan(huge.length);
+    expect(out).toContain("[truncated]");
+  });
+
+  it("does NOT truncate a body inside the bound", () => {
+    // Without this the test above passes on a derivePlain that truncates
+    // everything.
+    const small = "hello world";
+    expect(derivePlain(small)).toBe("hello world");
   });
 });
 
@@ -130,7 +143,7 @@ describe("headers", () => {
 describe("escaping", () => {
   it("escapes a plain original before it becomes HTML", () => {
     const noHtml: OriginalMessage = { ...CLI_ORIGINAL, html: undefined, plain: "a <b> & \"c\"" };
-    const { html } = buildReplyBodies(noHtml, "hi", "hi", (h) => h);
+    const { html } = buildReplyBodies(noHtml, "hi", "hi");
     expect(html).toContain("a &lt;b&gt; &amp; &quot;c&quot;");
     expect(html).not.toContain("<b>");
   });

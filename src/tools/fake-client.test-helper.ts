@@ -1,7 +1,13 @@
 import { vi } from "vitest";
 import type { GwsClient } from "../gws-client.js";
 
-/** A GwsClient stand-in shared by the tool-module test suites: `calls`
+/** ORDER-SENSITIVE: `plan` is consumed in call order. `gmail_reply` and
+ * `gmail_forward` now issue the signature lookup and the original fetch under
+ * `Promise.all`, which invokes them in source order — sendAs first, then the
+ * message fetch — so a plan written in that order is correct today. Reorder
+ * those two inside the handler and the planned responses silently swap.
+ *
+ * A GwsClient stand-in shared by the tool-module test suites: `calls`
  * records every api() and helper() invocation in order (api entries carry
  * `method`, helper entries carry `command`), `plan` decides each call's
  * fate in order. */
