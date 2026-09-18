@@ -37,7 +37,13 @@ export function fakeClient(
     const s = step();
     return { status: s.status ?? 200, text: s.text ?? "" };
   });
-  return { client: { api, helper, fetchText } as unknown as GwsClient, calls };
+  // gmailAttachmentToDrive entries carry `transfer`; the transport owns how
+  // the bytes move, so a handler test only sees the request and the answer.
+  const gmailAttachmentToDrive = vi.fn(async (transfer: Record<string, unknown>) => {
+    calls.push({ transfer });
+    return next();
+  });
+  return { client: { api, helper, fetchText, gmailAttachmentToDrive } as unknown as GwsClient, calls };
 }
 
 /** The JSON body a handler wrapped in its MCP response envelope. */

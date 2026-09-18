@@ -1,65 +1,56 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GwsClient, TransientGwsError, isTransient } from "./gws-client.js";
 
-/** Drives the real `api()` with `exec` swapped out, so the argument assembly
+/** A token-bearing client with `fetch` swapped out, so the request assembly
  * under test runs exactly as it does in production. */
-function clientWithExec(
-  exec: (args: string[]) => Promise<{ success: boolean; data: unknown }>
-): { client: GwsClient; argv: string[][] } {
-  const argv: string[][] = [];
-  const client = Object.create(GwsClient.prototype) as GwsClient;
-  (client as unknown as { exec: unknown }).exec = async (args: string[]) => {
-    argv.push(args);
-    return exec(args);
-  };
-  return { client, argv };
+function clientWithFetch(respond: (url: string, init: RequestInit) => Response | Promise<Response>) {
+  const requests: Array<{ url: string; init: RequestInit }> = [];
+  const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    requests.push({ url: String(input), init: init ?? {} });
+    return respond(String(input), init ?? {});
+  });
+  return { client: new GwsClient({ accessToken: "test-token" }), requests, spy };
 }
+const ok = (body: unknown) => new Response(JSON.stringify(body), { status: 200 });
 
-/** The `--params` JSON the client handed to the binary. */
-function paramsSentIn(argv: string[]): Record<string, unknown> {
-  const at = argv.indexOf("--params");
-  expect(at).toBeGreaterThan(-1);
-  return JSON.parse(argv[at + 1]) as Record<string, unknown>;
-}
+afterEach(() => vi.restoreAllMocks());
 
-/* SCRUM-178. The transport used to refuse every array before the call,
- * on the belief that the binary flattened it into one query value. The
- * pinned binary sends a repeated key; the belief cost every batchGet,
- * metadataHeaders and labelIds call for months. These pin the argv half:
- * the array reaches the binary intact. The other half, what the binary
- * does with it, is pinned against the real binary in
- * gws-cli-transport.test.ts. */
-describe("repeated query parameters reach the binary as arrays (SCRUM-178)", () => {
+/* SCRUM-178, carried across SCRUM-289. The old transport once refused every
+ * array on a wrong belief about the binary; the pinned binary sends a
+ * repeated key, and so must this client. The oracle test holds the two equal
+ * for every method; these pin the wire form a reader can see. */
+describe("repeated query parameters go out as repeated keys (SCRUM-178)", () => {
   it.each([
     ["sheets", "spreadsheets", "get", { spreadsheetId: "s", ranges: ["A!A1:B2", "A!A9:B10"] }, "ranges"],
     ["gmail", "users.messages", "get", { userId: "me", id: "m", format: "metadata", metadataHeaders: ["From", "Subject"] }, "metadataHeaders"],
     ["gmail", "users.messages", "list", { userId: "me", labelIds: ["INBOX", "UNREAD"] }, "labelIds"],
-  ])("%s %s %s carries the array unchanged", async (service, resource, method, params, key) => {
-    const { client, argv } = clientWithExec(async () => ({ success: true, data: {} }));
+  ])("%s %s %s: one pair per element", async (service, resource, method, params, key) => {
+    const { client, requests } = clientWithFetch(() => ok({}));
     await client.api(service, resource, method, { params });
 
-    expect(argv).toHaveLength(1);
-    expect(paramsSentIn(argv[0])[key]).toEqual(params[key as keyof typeof params]);
+    expect(requests).toHaveLength(1);
+    const sent = new URL(requests[0].url).searchParams.getAll(key);
+    expect(sent).toEqual(params[key as keyof typeof params]);
   });
 
   it("refuses an array of non-scalars before the call, naming the key and the shape", async () => {
-    const { client, argv } = clientWithExec(async () => ({ success: true, data: {} }));
+    const { client, requests } = clientWithFetch(() => ok({}));
     const err = await client
       .api("sheets", "spreadsheets", "get", {
         params: { spreadsheetId: "s", ranges: [{ sheet: "A", range: "A1" }] },
       })
       .catch((e: Error) => e);
 
-    // Failing BEFORE the request is still the point for this shape: the
-    // binary would stringify the object and Google would blame the range.
-    expect(argv).toHaveLength(0);
+    // Failing BEFORE the request is still the point for this shape: it would
+    // go out as one stringified value and Google would blame the range.
+    expect(requests).toHaveLength(0);
     expect((err as Error).message).toContain('"ranges"');
     expect((err as Error).message).toMatch(/nested arrays or objects/);
     expect((err as Error).message).not.toMatch(/unable to parse range/i);
   });
 
   it("names every offending key, and only the offending ones", async () => {
-    const { client } = clientWithExec(async () => ({ success: true, data: {} }));
+    const { client } = clientWithFetch(() => ok({}));
     const err = await client
       .api("drive", "files", "list", {
         params: { ids: [["a"]], parents: [null], fields: ["id", "name"] },
@@ -71,13 +62,14 @@ describe("repeated query parameters reach the binary as arrays (SCRUM-178)", () 
     expect((err as Error).message).not.toContain('"fields"');
   });
 
-  it("leaves scalar params alone", async () => {
-    const { client, argv } = clientWithExec(async () => ({ success: true, data: {} }));
+  it("leaves scalar params alone, and puts path parameters in the path", async () => {
+    const { client, requests } = clientWithFetch(() => ok({}));
     await client.api("sheets", "spreadsheets.values", "get", {
       params: { spreadsheetId: "s", range: "A1", valueRenderOption: "FORMULA" },
     });
-    expect(argv[0]).toContain("--params");
-    expect(argv[0].join(" ")).toContain("FORMULA");
+    const url = new URL(requests[0].url);
+    expect(url.pathname).toBe("/v4/spreadsheets/s/values/A1");
+    expect([...url.searchParams]).toEqual([["valueRenderOption", "FORMULA"]]);
   });
 });
 

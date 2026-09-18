@@ -2,14 +2,15 @@
 
 ## Project
 
-Google Workspace MCP extension for Claude. Wraps the `gws` CLI binary to expose 68 tools (Gmail, Calendar, Drive, Contacts, Sheets, Docs, Slides, Tasks, generic API access) via MCP.
+Google Workspace MCP extension for Claude. Calls the Google REST APIs directly (the `gws` CLI remains only as a no-token self-host fallback and for login) to expose 68 tools (Gmail, Calendar, Drive, Contacts, Sheets, Docs, Slides, Tasks, generic API access) via MCP.
 
 ## Commands
 
 - `pnpm run build` — compile TypeScript (src/ → server/)
 - `pnpm run dev` — watch mode
 - `pnpm run build:extension` — compile + pack into `google-workspace-mcp.mcpb`
-- `pnpm run download-binaries` — fetch gws binaries into bin/
+- `pnpm run download-binaries` — fetch gws binaries into bin/ (opt-in: needed for self-hosted login, the no-token fallback, and the oracle test; `build` no longer runs it)
+- `node scripts/generate-method-table.mjs` — regenerate `src/google-api/method-table.ts` from Google's Discovery documents
 
 ## Architecture
 
@@ -18,7 +19,7 @@ Two entry points sharing `createMcpServer()` from `create-server.ts`:
 - `extension.ts` — stdio transport for `.mcpb` (Claude Desktop). Auto-triggers browser OAuth login on first run.
 - `index.ts` — HTTP transport on port 39147 for Claude Code / standalone use.
 
-`gws-client.ts` wraps the `gws` CLI binary (Rust, in `bin/`). OAuth client ID and secret are read from `GWS_OAUTH_CLIENT_ID` / `GWS_OAUTH_CLIENT_SECRET` env vars and passed to the binary.
+`gws-client.ts` is the client every tool calls. With a bearer token (every hosted call) `api()` is a `fetch` built from the generated method table in `src/google-api/`; it never spawns a process and never loads the CLI. With no token it falls back to `cli-transport.ts`, which wraps the `gws` binary (Rust, in `bin/`) and also owns the login flow. `src/google-api/oracle.test.ts` holds the request builder equal to the pinned CLI's `--dry-run` for every method; it fails, not skips, when the binary is missing. The token goes in the `Authorization` header only. OAuth client ID and secret are read from `GWS_OAUTH_CLIENT_ID` / `GWS_OAUTH_CLIENT_SECRET` env vars and passed to the binary on the fallback path.
 
 ## Key conventions
 

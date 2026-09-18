@@ -95,3 +95,24 @@ describe("the HTML cap does not cut through a surrogate pair", () => {
     expect(body).toContain("chars of HTML before text extraction");
   });
 });
+
+/* SCRUM-289: the tool states WHAT to move; the transport decides how. */
+describe("gmail_save_attachment_to_drive", () => {
+  it("hands the transfer to the client with the caller's names, and returns the Drive file", async () => {
+    const { client, calls } = fakeClient([{ data: { id: "f1", name: "q3.pdf", webViewLink: "https://drive.google.com/file/d/f1/view" } }]);
+    const res = await handleGmail(client, "gmail_save_attachment_to_drive", {
+      message_id: "m1",
+      attachment_id: "a1",
+      filename: "q3.pdf",
+      parent_folder_id: "folder9",
+    });
+    expect(calls).toEqual([{ transfer: { messageId: "m1", attachmentId: "a1", name: "q3.pdf", parent: "folder9" } }]);
+    expect(payload(res)).toEqual({ id: "f1", name: "q3.pdf", webViewLink: "https://drive.google.com/file/d/f1/view" });
+  });
+
+  it("passes no parent when none was given", async () => {
+    const { client, calls } = fakeClient([{ data: { id: "f1" } }]);
+    await handleGmail(client, "gmail_save_attachment_to_drive", { message_id: "m1", attachment_id: "a1", filename: "a.txt" });
+    expect((calls[0].transfer as { parent?: string }).parent).toBeUndefined();
+  });
+});

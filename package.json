@@ -4,7 +4,7 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "build": "bash scripts/download-binaries.sh && tsc",
+    "build": "tsc",
     "dev": "tsc --watch",
     "download-binaries": "bash scripts/download-binaries.sh",
     "build:extension": "bash scripts/build-extension.sh",

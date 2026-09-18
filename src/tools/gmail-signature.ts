@@ -28,8 +28,8 @@ const SIGNATURE_MARKER = /gmail_signature/i;
  * open-ended runs are quadratic on a body holding unclosed tags — measured at
  * over two minutes of blocked event loop on a 1MB body, on a process that
  * serves every session from one loop, so it is other tenants' outage and not
- * just this caller's. Nothing upstream caps an inbound body: the argv guard
- * is downstream, so it only rejects the body AFTER this has run.
+ * just this caller's. Nothing caps an inbound body, so this has to be linear
+ * on its own.
  *
  * This walks each tag exactly once instead. Both scans advance monotonically,
  * and the per-tag tests are anchored or bounded by that tag, so the whole
