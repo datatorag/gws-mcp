@@ -75,7 +75,12 @@ export function signatureHtmlBlock(sigHtml: string): string {
 
 export function appendHtmlSignature(html: string, sigHtml: string): string {
   const block = signatureHtmlBlock(sigHtml);
-  const close = html.toLowerCase().lastIndexOf("</body>");
+  // Only the tail can hold the closing tag, and lowercasing the whole body to
+  // find a 7-character token allocates a full UTF-16 copy of it — GC pressure
+  // every other tenant on this loop pays for.
+  const tailFrom = Math.max(0, html.length - 1024);
+  const inTail = html.slice(tailFrom).toLowerCase().lastIndexOf("</body>");
+  const close = inTail === -1 ? -1 : tailFrom + inTail;
   if (close !== -1) return html.slice(0, close) + block + html.slice(close);
   return html + block;
 }
@@ -199,6 +204,10 @@ export interface SignedBodies {
   state: SignatureState;
 }
 
+export function suppressionRequested(value: unknown): boolean {
+  return value === false || value === "false";
+}
+
 /** Resolve and apply the signature to a send's bodies.
  *
  * Every send tool goes through this one function, so the injection cannot be
@@ -216,10 +225,6 @@ export interface SignedBodies {
  * to suppress cannot be recalled once the mail is out, while a missing one is
  * harmless. So suppression is read generously and everything else defaults to
  * applying, which is what the design asks for. */
-export function suppressionRequested(value: unknown): boolean {
-  return value === false || value === "false";
-}
-
 export async function applySignature(
   client: GwsClient,
   args: Record<string, unknown>,

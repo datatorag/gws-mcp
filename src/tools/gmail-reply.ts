@@ -1,3 +1,6 @@
+import { singleLine } from "./mime-headers.js";
+import { stripHtml } from "./response.js";
+
 /** Building a reply as multipart/alternative.
  *
  * The `gws` CLI's `+reply` helper takes ONE body and a boolean `--html`, so it
@@ -11,15 +14,21 @@
  * signed reply quotes identically to an unsigned one. An unsigned reply still
  * goes through the CLI untouched. */
 
+/** How much markup is flattened when a plain alternative has to be DERIVED.
+ *
+ * Deriving one means running the shared flattener over caller- or
+ * sender-supplied markup, so the input is bounded before it gets there rather
+ * than after. THE single bound for that concern — it used to be stated twice,
+ * with the larger of the two unable to ever bind. */
+const PLAIN_DERIVE_MAX = 128 * 1024;
+
+export function derivePlain(html: string): string {
+  if (html.length <= PLAIN_DERIVE_MAX) return stripHtml(html);
+  return `${stripHtml(html.slice(0, PLAIN_DERIVE_MAX))}\n…[truncated]`;
+}
+
 const QUOTE_STYLE =
   "margin:0 0 0 0.8ex;border-left:1px solid rgb(204,204,204);padding-left:1ex";
-
-/** How much of an original HTML body is flattened for the plain quote.
- *
- * Only reached when the original has no text/plain part. The flattener is
- * shared text-extraction and the input is inbound mail, i.e. attacker-supplied,
- * so it is bounded here rather than trusted. */
-const QUOTE_FLATTEN_MAX = 512 * 1024;
 
 export interface OriginalMessage {
   /** Raw `From` header value, e.g. `Manuel Yang <m@x.com>`. */
@@ -32,22 +41,6 @@ export interface OriginalMessage {
   references?: string;
   plain?: string;
   html?: string;
-}
-
-/** Fold any line break out of a value destined for a header.
- *
- * EVERY value a reply or forward derives comes out of a message someone else
- * sent us, so a CRLF in the original's Message-ID, References, Subject or From
- * would inject a header into the mail WE send — `Bcc:` being the worst case,
- * silently copying the user's reply to the attacker. `encodeHeaderValue`
- * cannot be relied on here: it returns an all-ASCII value unchanged, and
- * `assertHeadersSingleLine` only ever saw the CALLER's arguments.
- *
- * Folded to a space rather than rejected: a reply must not fail because the
- * message being replied to was malformed, and a space keeps the value usable.
- * A bare LF counts — most parsers start a new header on it. */
-export function singleLine(value: string): string {
-  return value.replace(/[\r\n]+/g, " ").trim();
 }
 
 /** The bare address out of a `From` header. Returns the input unchanged when
@@ -129,15 +122,25 @@ export function htmlQuoteBlock(original: OriginalMessage, originalHtml: string):
 }
 
 /** The plain text quoted, preferring the original's own text/plain part and
- * flattening its HTML only when there is none. */
-export function originalPlainText(
-  original: OriginalMessage,
-  flatten: (html: string) => string
-): string {
+ * flattening its HTML only when there is none.
+ *
+ * `derivePlain` owns the bound. This used to take the flattener as a parameter
+ * and pre-slice at its own larger constant first, which could never bind and
+ * read as live protection. One cap, one owner. */
+export function originalPlainText(original: OriginalMessage): string {
   if (original.plain !== undefined) return original.plain;
   if (original.html === undefined) return "";
-  const html = original.html;
-  return flatten(html.length > QUOTE_FLATTEN_MAX ? html.slice(0, QUOTE_FLATTEN_MAX) : html);
+  return derivePlain(original.html);
+}
+
+/** The original rendered as HTML for quoting: its own markup when it has any,
+ * otherwise its plain text escaped. Shared by the reply and forward paths so
+ * the two cannot drift. */
+export function originalHtmlBody(original: OriginalMessage): string {
+  return (
+    original.html ??
+    `<div dir="ltr">${escapeHtml(original.plain ?? "").replace(/\r\n|\r|\n/g, "<br>")}</div>`
+  );
 }
 
 /** The two alternative bodies of a signed reply.
@@ -148,19 +151,15 @@ export function originalPlainText(
 export function buildReplyBodies(
   original: OriginalMessage,
   plainBody: string,
-  signedHtml: string,
-  flatten: (html: string) => string
+  signedHtml: string
 ): { plain: string; html: string } {
-  const quotedSource =
-    original.html !== undefined
-      ? original.html
-      : `<div dir="ltr">${escapeHtml(original.plain ?? "").replace(/\r\n|\r|\n/g, "<br>")}</div>`;
+  const quotedSource = originalHtmlBody(original);
   return {
     plain: [
       plainBody,
       "",
       plainAttribution(original.date, original.from),
-      quotePlain(originalPlainText(original, flatten)),
+      quotePlain(originalPlainText(original)),
     ].join("\n"),
     html: `${signedHtml}<br>\n${htmlQuoteBlock(original, quotedSource)}`,
   };

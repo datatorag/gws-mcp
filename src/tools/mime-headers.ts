@@ -70,16 +70,20 @@ function splitAddresses(list: string): string[] {
 
 /** `Name <addr>` with a non-ASCII name becomes `=?UTF-8?B?...?= <addr>`; the
  * address itself is never touched, and an ASCII entry passes through as it was. */
-/** Defence in depth for the address encoders.
+/** Fold any line break out of a value destined for a header.
  *
  * `encodeHeaderValue` is safe by accident: `isAscii` excludes CR and LF, so a
  * value carrying one is B-encoded and the break stops being structural. The
- * address path has no such luck — a CRLF address has no angle-addr, so it is
- * returned verbatim and a `\r\nBcc:` becomes a real header. Callers are
- * expected to reject line breaks in their own arguments before reaching here;
- * this fold is so that forgetting to is not exploitable. */
-function foldLineBreaks(value: string): string {
-  return value.replace(/[\r\n]+/g, " ");
+ * address path has no such luck — a CRLF address has no angle-addr, so it
+ * would be returned verbatim and a `\r\nBcc:` would become a real header.
+ *
+ * The same fold is what protects every value a reply or forward copies out of
+ * an INBOUND message (Message-ID, References, Subject, From). Folds rather
+ * than rejects: a reply must not fail because the message being replied to was
+ * malformed. Callers still reject a line break in their OWN arguments, which
+ * is a contract error deserving a clear message; this is the other half. */
+export function singleLine(value: string): string {
+  return value.replace(/[\r\n]+/g, " ").trim();
 }
 
 export function encodeAddressHeader(list: string): string {
@@ -89,10 +93,10 @@ export function encodeAddressHeader(list: string): string {
       const m = /^(.*?)\s*<([^<>]+)>$/.exec(entry);
       // A bare address: nothing to ENCODE, but a line break in it would
       // still be structural, so it is folded.
-      if (!m) return foldLineBreaks(entry);
+      if (!m) return singleLine(entry);
       // Folded ONCE, here, because three of the returns below interpolate it
       // and a per-branch fold is one someone can forget.
-      const addr = foldLineBreaks(m[2]);
+      const addr = singleLine(m[2]);
       let name = m[1].trim();
       if (name.startsWith('"') && name.endsWith('"') && name.length >= 2) {
         name = name.slice(1, -1);

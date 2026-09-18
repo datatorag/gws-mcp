@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { handleGmail } from "./gmail.js";
+import { handleGmail, renderHeaders } from "./gmail.js";
 import { fakeClient, payload } from "./fake-client.test-helper.js";
 
 /** Decode the base64url raw MIME a compose call emitted. These tests assert
@@ -866,5 +866,77 @@ describe("header injection through the CALLER's arguments (gate finding)", () =>
     await expect(
       handleGmail(client, "gmail_send", { to: evilTo, subject: "Hi", body: "x" })
     ).rejects.toThrow("to must not contain a line break");
+  });
+});
+
+describe("header rendering folds injections but keeps legal continuations", () => {
+  it("keeps a long non-ASCII subject FOLDED in the rendered headers", () => {
+    // encodeHeaderValue wraps long encoded subjects with CRLF + space. That is
+    // legal folding, not an injection, and a blanket fold destroys it — the
+    // header then runs past the 998-octet line limit as one line.
+    const { client, calls } = fakeClient([NO_SIG, { data: { id: "m1" } }]);
+    return handleGmail(client, "gmail_send", {
+      to: "a@example.com",
+      subject: "ü".repeat(200),
+      body: "x",
+    }).then(() => {
+      const mime = rawMime(calls[1]);
+      const headerBlock = mime.split("\r\n\r\n")[0];
+      expect(headerBlock).toMatch(/\r\n /);
+      for (const line of headerBlock.split("\r\n")) {
+        expect(line.length).toBeLessThan(998);
+      }
+    });
+  });
+
+  it("STILL folds a line break that is not a continuation", () => {
+    // The control: without it the test above passes on a renderer that folds
+    // nothing at all.
+    const { client, calls } = fakeClient([NO_SIG, { data: { id: "m1" } }]);
+    return handleGmail(client, "gmail_send", {
+      to: "a@example.com",
+      subject: "Hi",
+      body: "x",
+    }).then(() => {
+      const mime = rawMime(calls[1]);
+      const headerBlock = mime.split("\r\n\r\n")[0];
+      // every header line is a real header, none injected
+      for (const line of headerBlock.split("\r\n")) {
+        expect(line.startsWith(" ") || /^[A-Za-z-]+:/.test(line)).toBe(true);
+      }
+    });
+  });
+});
+
+
+describe("renderHeaders is the last line of defence, tested directly", () => {
+  // It is unreachable through handleGmail today: every producer already folds,
+  // so removing this guard leaves the whole suite green. That is exactly why it
+  // needs its own test -- an untested guard is one a later refactor deletes.
+  // Asserted as "no stray CR or LF survives anywhere", not as "no line starts
+  // with Bcc:". Splitting on CRLF and checking line starts cannot see a BARE
+  // LF injection at all -- the whole string stays one "line" and the assertion
+  // passes while the injection survives.
+  const strayBreaks = (rendered: string) =>
+    rendered.split(/\r\n(?=[ \t])/).join("").replace(/\r\n/g, "").match(/[\r\n]/g) ?? [];
+
+  it("folds an injected header out of a value", () => {
+    const out = renderHeaders(["To: victim@example.com\r\nBcc: attacker@example.com"]);
+    expect(strayBreaks(out)).toHaveLength(0);
+    expect(out).toContain("victim@example.com");
+  });
+
+  it("folds a BARE LF too, which still starts a line for most parsers", () => {
+    const out = renderHeaders(["Subject: a\nBcc: attacker@example.com"]);
+    expect(strayBreaks(out)).toHaveLength(0);
+  });
+
+  it("joins separate headers with CRLF, which is the job", () => {
+    expect(renderHeaders(["A: 1", "B: 2"])).toBe("A: 1\r\nB: 2");
+  });
+
+  it("PRESERVES a legal continuation, the one CRLF that must survive", () => {
+    const folded = "Subject: =?UTF-8?B?AAAA?=\r\n =?UTF-8?B?BBBB?=";
+    expect(renderHeaders([folded])).toBe(folded);
   });
 });
