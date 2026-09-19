@@ -27,9 +27,10 @@ function parseMultipart(mime: string) {
   return { boundary, parts };
 }
 
-/** Every SEND tool resolves the signature before it composes anything
- * (SCRUM-278), so a plan for gmail_send / _reply / _forward / _send_draft
- * leads with a sendAs.list step and the composed call lands at calls[1].
+/** Every tool that writes or sends a message resolves the signature before
+ * it composes anything (SCRUM-278 for the send tools, SCRUM-291 for the draft
+ * tools), so its plan leads with a sendAs.list step and the composed call
+ * lands at calls[1].
  * These cases assert the UNSIGNED shape, so the account has no signature —
  * which is also the property "a plain send with no signature is byte-identical
  * to before" is made of. */
@@ -59,6 +60,7 @@ const ORIGINAL = {
 describe("plain-text compose (unchanged shape)", () => {
   it("gmail_create_draft with body only emits single-part text/plain", async () => {
     const { client, calls } = fakeClient([
+      NO_SIG,
       { data: { id: "d1", message: { id: "m1" } } },
     ]);
     await handleGmail(client, "gmail_create_draft", {
@@ -67,7 +69,7 @@ describe("plain-text compose (unchanged shape)", () => {
       body: "plain words",
     });
 
-    const mime = rawMime(calls[0]);
+    const mime = rawMime(calls[1]);
     expect(mime).toContain("Content-Type: text/plain; charset=utf-8");
     expect(mime).not.toContain("multipart/alternative");
     expect(mime).toContain("plain words");
@@ -123,6 +125,7 @@ describe("html_body composes multipart/alternative", () => {
 
   it("derives the plain fallback from the HTML when body is absent", async () => {
     const { client, calls } = fakeClient([
+      NO_SIG,
       { data: { id: "d1", message: { id: "m1" } } },
     ]);
     await handleGmail(client, "gmail_create_draft", {
@@ -131,14 +134,14 @@ describe("html_body composes multipart/alternative", () => {
       html_body: "<p>Hello <b>world</b></p>",
     });
 
-    const { parts } = parseMultipart(rawMime(calls[0]));
+    const { parts } = parseMultipart(rawMime(calls[1]));
     const plainBody = parts[0].split("\r\n\r\n")[1];
     expect(plainBody).toContain("Hello world");
     expect(plainBody).not.toContain("<b>"); // never raw markup in the fallback
   });
 
   it("gmail_update_draft carries html_body through the same builder", async () => {
-    const { client, calls } = fakeClient([{ data: { id: "d1" } }]);
+    const { client, calls } = fakeClient([NO_SIG, { data: { id: "d1" } }]);
     await handleGmail(client, "gmail_update_draft", {
       draft_id: "d1",
       thread_id: "t1",
@@ -147,10 +150,10 @@ describe("html_body composes multipart/alternative", () => {
       html_body: "<i>updated</i>",
     });
 
-    const mime = rawMime(calls[0]);
+    const mime = rawMime(calls[1]);
     expect(mime).toContain("multipart/alternative");
     expect(mime).toContain("<i>updated</i>");
-    expect((calls[0].jsonBody as { message: { threadId?: string } }).message.threadId).toBe("t1");
+    expect((calls[1].jsonBody as { message: { threadId?: string } }).message.threadId).toBe("t1");
   });
 });
 
@@ -334,13 +337,13 @@ describe("non-ASCII headers are RFC 2047 encoded (SCRUM-249)", () => {
   });
 
   it("drafts encode the display name in To and leave the address bare", async () => {
-    const { client, calls } = fakeClient([{ data: { id: "d1", message: { id: "m1" } } }]);
+    const { client, calls } = fakeClient([NO_SIG, { data: { id: "d1", message: { id: "m1" } } }]);
     await handleGmail(client, "gmail_create_draft", {
       to: "Jörg Müller <jorg@example.com>",
       subject: "Hi",
       body: "x",
     });
-    const mime = rawMime(calls[0]);
+    const mime = rawMime(calls[1]);
     const to = /^To: (.*)$/m.exec(mime)![1];
     expect(to).toMatch(/^=\?UTF-8\?B\?[A-Za-z0-9+/=]+\?= <jorg@example.com>$/);
     expect(decodeHeader(to)).toBe("Jörg Müller <jorg@example.com>");
@@ -557,20 +560,171 @@ describe("signature on send (SCRUM-278)", () => {
     expect(rawMime(calls[2])).toContain(SIG);
   });
 
-  it("the draft tools never touch the signature", async () => {
-    for (const tool of ["gmail_create_draft", "gmail_update_draft"]) {
-      const { client, calls } = fakeClient([{ data: { id: "d1", message: { id: "m1" } } }]);
-      await handleGmail(client, tool, {
-        draft_id: "d1",
-        thread_id: "t1",
-        to: "a@b.c",
-        subject: "Hi",
-        body: "Hi",
-      });
+});
+
+/* SCRUM-291 reverses "drafts stay unsigned". Gmail's own Compose signs when
+ * the draft is written, and a draft made here and then sent from Gmail never
+ * passed through gmail_send_draft, so it never got a signature at all. The
+ * draft tools now sign exactly as the send tools do. */
+describe("the draft tools sign the draft (SCRUM-291)", () => {
+  const SIG = '<div dir="ltr">Regards,<div>Dana Rivers</div></div>';
+  const withSig = () => ({ data: { sendAs: [{ sendAsEmail: "sender@example.com", isDefault: true, signature: SIG }] } });
+  const created = { data: { id: "d1", message: { id: "m1", threadId: "t1" } } };
+  const count = (haystack: string, needle: string) => haystack.split(needle).length - 1;
+  const draftArgs = { to: "a@b.c", subject: "Hi", body: "Hello there" };
+
+  it("gmail_create_draft: one sendAs lookup, then a draft whose HTML part carries the stored markup in Gmail's wrapper", async () => {
+    const { client, calls } = fakeClient([withSig(), created]);
+    const res = await handleGmail(client, "gmail_create_draft", draftArgs);
+
+    expect(calls.map((c) => `${c.resource}.${c.method}`)).toEqual(["users.settings.sendAs.list", "users.drafts.create"]);
+    const { parts } = parseMultipart(rawMime(calls[1]));
+    expect(parts).toHaveLength(2);
+    // HTML part only: the plain part is the caller's body, untouched.
+    expect(parts[0]).toContain("text/plain");
+    expect(parts[0]).toContain("Hello there");
+    expect(parts[0]).not.toContain("Dana Rivers");
+    expect(parts[1]).toContain("text/html");
+    expect(parts[1]).toContain(`<div dir="ltr" class="gmail_signature" data-smartmail="gmail_signature">${SIG}</div>`);
+    expect(count(parts[1], "data-smartmail")).toBe(1);
+    expect(payload(res).signature).toBe("applied");
+    // the draft response keeps what it had
+    expect(payload(res).id).toBe("d1");
+    expect(payload(res).gmail_url).toContain("#drafts?compose=m1");
+  });
+
+  it("gmail_update_draft signs too, and still preserves the thread it looked up", async () => {
+    const { client, calls } = fakeClient([withSig(), { data: { message: { threadId: "t9" } } }, created]);
+    const res = await handleGmail(client, "gmail_update_draft", { draft_id: "d1", ...draftArgs });
+
+    expect(calls.map((c) => `${c.resource}.${c.method}`)).toEqual([
+      "users.settings.sendAs.list",
+      "users.drafts.get",
+      "users.drafts.update",
+    ]);
+    expect(rawMime(calls[2])).toContain(SIG);
+    expect((calls[2].jsonBody as { message: { threadId?: string } }).message.threadId).toBe("t9");
+    expect(payload(res).signature).toBe("applied");
+  });
+
+  it("an html_body draft is signed in place and its plain fallback stays unsigned", async () => {
+    const { client, calls } = fakeClient([withSig(), created]);
+    await handleGmail(client, "gmail_create_draft", { to: "a@b.c", subject: "Hi", html_body: "<p>rich</p>" });
+    const { parts } = parseMultipart(rawMime(calls[1]));
+    expect(parts[1]).toContain("<p>rich</p>");
+    expect(parts[1]).toContain(SIG);
+    expect(parts[0]).not.toContain("Dana Rivers");
+  });
+
+  it.each(["gmail_create_draft", "gmail_update_draft"])(
+    "%s with signature: false makes no lookup and writes the draft exactly as before",
+    async (tool) => {
+      const { client, calls } = fakeClient([created]);
+      const res = await handleGmail(client, tool, { draft_id: "d1", thread_id: "t1", ...draftArgs, signature: false });
       expect(calls).toHaveLength(1);
       expect(calls[0]).toMatchObject({ resource: "users.drafts" });
-      expect(rawMime(calls[0])).not.toContain("gmail_signature");
+      const mime = rawMime(calls[0]);
+      expect(mime).toContain("Content-Type: text/plain; charset=utf-8");
+      expect(mime).not.toContain("multipart/alternative");
+      expect(mime).not.toContain("gmail_signature");
+      expect(payload(res).signature).toBe("suppressed");
     }
+  );
+
+  it("an account with no signature gets the plain draft it always got, and says none_set", async () => {
+    const { client, calls } = fakeClient([NO_SIG, created]);
+    const res = await handleGmail(client, "gmail_create_draft", draftArgs);
+    const mime = rawMime(calls[1]);
+    expect(mime).toContain("Content-Type: text/plain; charset=utf-8");
+    expect(mime).not.toContain("multipart/alternative");
+    expect(payload(res).signature).toBe("none_set");
+  });
+
+  it("a failed lookup still writes the draft, unsigned, and says unavailable", async () => {
+    const { client, calls } = fakeClient([{ throws: "sendAs unavailable" }, created]);
+    const res = await handleGmail(client, "gmail_create_draft", draftArgs);
+    expect(calls.map((c) => c.method)).toEqual(["list", "create"]);
+    expect(rawMime(calls[1])).not.toContain("gmail_signature");
+    expect(payload(res).signature).toBe("unavailable");
+  });
+
+  it("a body that already ends with the signature is not signed twice", async () => {
+    const { client, calls } = fakeClient([withSig(), created]);
+    const res = await handleGmail(client, "gmail_create_draft", {
+      to: "a@b.c",
+      subject: "Hi",
+      html_body: `<p>rich</p>${SIG}`,
+    });
+    expect(count(rawMime(calls[1]), "Dana Rivers</div>")).toBe(1);
+    expect(payload(res).signature).toBe("already_present");
+  });
+
+  it("no cache: two drafts on two clients each read their own account's signature", async () => {
+    const other = { data: { sendAs: [{ sendAsEmail: "o@example.com", isDefault: true, signature: "<div>Other Person</div>" }] } };
+    const a = fakeClient([withSig(), created]);
+    const b = fakeClient([other, created]);
+    await handleGmail(a.client, "gmail_create_draft", draftArgs);
+    await handleGmail(b.client, "gmail_create_draft", draftArgs);
+    expect(rawMime(a.calls[1])).toContain("Dana Rivers");
+    expect(rawMime(a.calls[1])).not.toContain("Other Person");
+    expect(rawMime(b.calls[1])).toContain("Other Person");
+    expect(rawMime(b.calls[1])).not.toContain("Dana Rivers");
+  });
+
+  it("a line break in a header is still refused before the lookup costs a call", async () => {
+    const { client, calls } = fakeClient([withSig(), created]);
+    await expect(
+      handleGmail(client, "gmail_create_draft", { ...draftArgs, subject: "Hi\r\nBcc: x@evil.example" })
+    ).rejects.toThrow(/must not contain a line break/);
+    expect(calls).toHaveLength(0);
+  });
+
+  /* THE CHAINS. The draft this module writes is fed back as the stored MIME
+   * the next tool reads, so "signed once" is a property of the real output,
+   * not of a hand-written fixture. */
+  const storedDraft = (call: Record<string, unknown>) => {
+    const body = call.jsonBody as { message: { raw: string } };
+    return { data: { id: "d1", message: { id: "m1", threadId: "t1", raw: body.message.raw } } };
+  };
+
+  it("create_draft then send_draft: exactly one signature block, and the send neither rewrites nor double-signs", async () => {
+    const first = fakeClient([withSig(), created]);
+    await handleGmail(first.client, "gmail_create_draft", draftArgs);
+
+    const second = fakeClient([storedDraft(first.calls[1]), withSig(), { data: { id: "sent1" } }]);
+    const res = await handleGmail(second.client, "gmail_send_draft", { draft_id: "d1" });
+    // no drafts.update: the draft goes out as stored
+    expect(second.calls.map((c) => `${c.resource}.${c.method}`)).toEqual([
+      "users.drafts.get",
+      "users.settings.sendAs.list",
+      "users.drafts.send",
+    ]);
+    expect(payload(res).signature).toBe("already_present");
+    expect(count(rawMime(first.calls[1]), "data-smartmail")).toBe(1);
+  });
+
+  it("create_draft then update_draft: the replacement carries exactly one signature block", async () => {
+    const first = fakeClient([withSig(), created]);
+    await handleGmail(first.client, "gmail_create_draft", draftArgs);
+    const second = fakeClient([withSig(), created]);
+    await handleGmail(second.client, "gmail_update_draft", { draft_id: "d1", thread_id: "t1", ...draftArgs, body: "Hello again" });
+    const mime = rawMime(second.calls[1]);
+    expect(count(mime, "data-smartmail")).toBe(1);
+    expect(mime).toContain("Hello again");
+
+    const third = fakeClient([storedDraft(second.calls[1]), withSig(), { data: { id: "sent1" } }]);
+    const res = await handleGmail(third.client, "gmail_send_draft", { draft_id: "d1" });
+    expect(third.calls.map((c) => c.method)).toEqual(["get", "list", "send"]);
+    expect(payload(res).signature).toBe("already_present");
+  });
+
+  it("a draft written with signature: false is signed when gmail_send_draft sends it", async () => {
+    const first = fakeClient([created]);
+    await handleGmail(first.client, "gmail_create_draft", { ...draftArgs, signature: false });
+    const second = fakeClient([storedDraft(first.calls[0]), withSig(), { data: { id: "d1" } }, { data: { id: "sent1" } }]);
+    const res = await handleGmail(second.client, "gmail_send_draft", { draft_id: "d1" });
+    expect(second.calls.map((c) => c.method)).toEqual(["get", "list", "update", "send"]);
+    expect(payload(res).signature).toBe("applied");
   });
 });
 

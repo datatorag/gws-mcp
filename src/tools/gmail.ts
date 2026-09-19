@@ -56,13 +56,24 @@ const emailFields = {
   },
 };
 
-/** Only the SEND tools take this. The draft tools never apply a signature, so
- * offering them the switch would imply they might. */
+/** Every tool that writes or sends a message takes this. The draft tools
+ * joined the send tools in SCRUM-291: Gmail's own Compose signs when the
+ * draft is written, and a draft made here and then sent from Gmail's UI never
+ * passes through gmail_send_draft, so signing only at send left it bare. */
 const signatureField = {
   signature: {
     type: "boolean",
     description:
       "Set false to send without the account's Gmail signature, and to skip the lookup entirely. Defaults to true.",
+  },
+};
+
+/** The same switch, worded for a tool that writes a draft rather than sends. */
+const draftSignatureField = {
+  signature: {
+    type: "boolean",
+    description:
+      "Set false to write the draft without the account's Gmail signature, and to skip the lookup entirely. Defaults to true.",
   },
 };
 
@@ -73,9 +84,16 @@ const signatureField = {
 const SIGNATURE_NOTE =
   " The account's Gmail signature is appended automatically, so do not write a sign-off or signature in the body yourself; pass signature: false to send without it. The signature goes in the message's HTML part, so a plain-text body is sent as multipart/alternative when the account has one. The response's signature field reports what happened.";
 
-/** Appended to the draft tools' descriptions. */
+/** Appended to the draft tools' descriptions. Same warning as the send
+ * tools, for the same reason: a near-miss sign-off ships two. */
 const DRAFT_SIGNATURE_NOTE =
-  " No signature is added here — the account's Gmail signature is added when the draft is sent with gmail_send_draft — so do not write a sign-off or signature in the body yourself.";
+  " The account's Gmail signature is added to the draft automatically, as Gmail's own Compose does, so do not write a sign-off or signature in the body yourself; pass signature: false to leave it out. The signature goes in the draft's HTML part, so a plain-text body is stored as multipart/alternative when the account has one. The response's signature field reports what happened.";
+
+/** gmail_send_draft's own wording. The draft tools sign when the draft is
+ * written, so by the time a draft is sent it usually carries its signature
+ * already; this tool adds one only to a draft that does not. */
+const SEND_DRAFT_SIGNATURE_NOTE =
+  " The account's Gmail signature is added only if the draft is not already signed: a draft written by gmail_create_draft or gmail_update_draft carries it already and is sent unchanged, reporting already_present. Pass signature: false to send a draft without adding one. The response's signature field reports what happened.";
 
 export const gmailTools: ToolDef[] = [
   {
@@ -218,7 +236,7 @@ export const gmailTools: ToolDef[] = [
       DRAFT_SIGNATURE_NOTE,
     inputSchema: {
       type: "object",
-      properties: emailFields,
+      properties: { ...emailFields, ...draftSignatureField },
       required: ["to", "subject"],
     },
     annotations: CREATE("Create email draft"),
@@ -241,6 +259,7 @@ export const gmailTools: ToolDef[] = [
           description:
             "Thread ID to preserve threading. If omitted, the existing draft's thread is preserved automatically.",
         },
+        ...draftSignatureField,
       },
       required: ["draft_id", "to", "subject"],
     },
@@ -249,8 +268,8 @@ export const gmailTools: ToolDef[] = [
   {
     name: "gmail_send_draft",
     description:
-      "Send an existing Gmail draft by its draft ID. Use this to send a draft that was previously created with gmail_create_draft and reviewed — it sends the draft as-is apart from the signature, and removes it from the Drafts folder (no orphaned draft). Returns the sent message metadata." +
-      SIGNATURE_NOTE +
+      "Send an existing Gmail draft by its draft ID. Use this to send a draft that was previously created with gmail_create_draft and reviewed — it sends the draft as stored and removes it from the Drafts folder (no orphaned draft). Returns the sent message metadata." +
+      SEND_DRAFT_SIGNATURE_NOTE +
       " A draft holding an attachment, an inline image or any shape other than plain text or plain-plus-HTML is sent untouched and reports skipped_unsupported_draft.",
     inputSchema: {
       type: "object",
@@ -747,12 +766,14 @@ function buildRawMessage(
   );
 }
 
-function draftResponse(data: unknown) {
+/** The draft tools report the signature outcome the way the send tools do. */
+function draftResponse(data: unknown, signature: SignatureState) {
   const draft = data as { id?: string; message?: { id?: string; threadId?: string } };
   const messageId = draft?.message?.id || "";
   return jsonResponse({
     ...draft,
     gmail_url: `https://mail.google.com/mail/u/0/#drafts?compose=${messageId}`,
+    signature,
   });
 }
 
@@ -1206,35 +1227,41 @@ export async function handleGmail(
     }
 
     case "gmail_create_draft": {
-      const raw = buildRawMessage(toolName, args, resolveBody(toolName, args));
+      // Same order as gmail_send: refuse a bad header before the lookup costs
+      // a call, sign the RESOLVED body, then build MIME from what came back.
+      assertHeadersSingleLine(args);
+      const signed = await applySignature(client, args, resolveBody(toolName, args));
       const result = await client.api("gmail", "users.drafts", "create", {
         params: { userId: "me" },
-        jsonBody: { message: { raw } },
+        jsonBody: { message: { raw: buildRawMessage(toolName, args, signed) } },
       });
-      return draftResponse(result.data);
+      return draftResponse(result.data, signed.state);
     }
 
     case "gmail_update_draft": {
-      let threadId = args.thread_id as string | undefined;
-      if (!threadId) {
-        const existing = await client.api("gmail", "users.drafts", "get", {
-          params: { userId: "me", id: args.draft_id, format: "metadata" },
-        });
-        const existingData = existing.data as {
-          message?: { threadId?: string };
-        };
-        threadId = existingData?.message?.threadId;
-      }
+      assertHeadersSingleLine(args);
+      const bodies = resolveBody(toolName, args);
+      // Independent: the signature lookup reads the account's sendAs, the get
+      // reads the draft's thread, and neither needs the other's result.
+      const [signed, existingThreadId] = await Promise.all([
+        applySignature(client, args, bodies),
+        args.thread_id
+          ? Promise.resolve(args.thread_id as string)
+          : client
+              .api("gmail", "users.drafts", "get", {
+                params: { userId: "me", id: args.draft_id, format: "metadata" },
+              })
+              .then((existing) => (existing.data as { message?: { threadId?: string } })?.message?.threadId),
+      ]);
 
-      const raw = buildRawMessage(toolName, args, resolveBody(toolName, args));
-      const message: Record<string, unknown> = { raw };
-      if (threadId) message.threadId = threadId;
+      const message: Record<string, unknown> = { raw: buildRawMessage(toolName, args, signed) };
+      if (existingThreadId) message.threadId = existingThreadId;
 
       const result = await client.api("gmail", "users.drafts", "update", {
         params: { userId: "me", id: args.draft_id },
         jsonBody: { message },
       });
-      return draftResponse(result.data);
+      return draftResponse(result.data, signed.state);
     }
 
     case "gmail_send_draft":
