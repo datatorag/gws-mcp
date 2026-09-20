@@ -152,3 +152,123 @@ describe("fetchText carries the token only to Google (SCRUM-261)", () => {
     expect(out.text).toContain("setResponse");
   });
 });
+
+/* SCRUM-289, review additions. fetchText used to send the token through its
+ * own bare fetch; it now goes through the transport's guarded send under a
+ * named destination, so there is one place the token is put on the wire. */
+describe("fetchText goes through the guarded send (SCRUM-289)", () => {
+  const GVIZ = "https://docs.google.com/spreadsheets/d/s/gviz/tq";
+
+  it.each([
+    ["a port", "https://docs.google.com:8443/spreadsheets/d/s/gviz/tq"],
+    ["userinfo", "https://user:pw@docs.google.com/spreadsheets/d/s/gviz/tq"],
+    ["a lookalike suffix", "https://docs.google.com.example.com/spreadsheets/d/s/gviz/tq"],
+    ["a subdomain", "https://x.docs.google.com/spreadsheets/d/s/gviz/tq"],
+    ["another Google property", "https://sites.google.com/spreadsheets/d/s/gviz/tq"],
+  ])("refuses %s before any request", async (_, url) => {
+    const { client, requests } = clientWithFetch(() => ok({}));
+    await expect(client.fetchText(url)).rejects.toThrow(/only reaches Google origins/);
+    expect(requests).toHaveLength(0);
+  });
+
+  it("never follows a redirect: the 3xx comes back as a status, unfollowed", async () => {
+    const { client, requests } = clientWithFetch(
+      () => new Response(null, { status: 302, headers: { location: "https://example.com/steal" } })
+    );
+    const out = await client.fetchText(GVIZ);
+    expect(out.status).toBe(302);
+    expect(requests).toHaveLength(1);
+    expect(requests[0].init.redirect).toBe("manual");
+  });
+
+  it("a network failure is reported without the token or the URL's query", async () => {
+    const { client } = clientWithFetch(() => {
+      throw Object.assign(new TypeError("fetch failed"), { cause: { code: "ECONNRESET" } });
+    });
+    const err = await client.fetchText(`${GVIZ}?tq=select%20A`).catch((e: Error) => e);
+    expect(String(err)).toMatch(/could not reach Google/);
+    expect(String(err)).not.toMatch(/test-token|select/);
+  });
+});
+
+/* The media primitives SCRUM-279 builds on. Both need a token: the CLI
+ * fallback has no streaming path, and saying so beats spawning a process. */
+describe("upload and download on the client (SCRUM-289)", () => {
+  async function* bytes(text: string) {
+    yield new TextEncoder().encode(text);
+  }
+
+  it("both refuse without a token, before any request", async () => {
+    const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => ok({}));
+    const anonymous = new GwsClient();
+    await expect(anonymous.download("drive", "files", "get", { fileId: "f" })).rejects.toThrow(/needs an access token/);
+    await expect(
+      anonymous.upload("drive", "files", "create", { contentType: "text/plain", source: bytes("x") })
+    ).rejects.toThrow(/needs an access token/);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("download asks for alt=media where the method is a media download, and streams the body", async () => {
+    const { client, requests } = clientWithFetch(
+      () => new Response("hello", { status: 200, headers: { "content-type": "text/plain", "content-length": "5" } })
+    );
+    const out = await client.download("drive", "files", "get", { fileId: "f1" });
+    const url = new URL(requests[0].url);
+    expect(url.hostname).toBe("www.googleapis.com");
+    expect(url.pathname).toBe("/drive/v3/files/f1");
+    expect(url.searchParams.get("alt")).toBe("media");
+    expect((requests[0].init.headers as Record<string, string>).Authorization).toBe("Bearer test-token");
+    expect(requests[0].init.redirect).toBe("error");
+    expect(out.contentType).toBe("text/plain");
+    expect(out.size).toBe(5);
+    expect(await new Response(out.stream).text()).toBe("hello");
+  });
+
+  it("download leaves alt off a method that is not a media download", async () => {
+    const { client, requests } = clientWithFetch(() => ok({ data: "aGk" }));
+    await client.download("gmail", "users.messages.attachments", "get", { userId: "me", messageId: "m", id: "a" });
+    expect(new URL(requests[0].url).searchParams.has("alt")).toBe(false);
+  });
+
+  it("download turns an API error into the usual error, not a stream of it", async () => {
+    const { client } = clientWithFetch(
+      () => new Response(JSON.stringify({ error: { code: 404, message: "File not found" } }), { status: 404 })
+    );
+    await expect(client.download("drive", "files", "get", { fileId: "nope" })).rejects.toThrow(/404|not found/i);
+  });
+
+  it("upload sends metadata and bytes to the upload endpoint in one multipart request", async () => {
+    const { client, requests } = clientWithFetch(() => ok({ id: "new" }));
+    const out = await client.upload("drive", "files", "create", {
+      params: { fields: "id" },
+      metadata: { name: "note.txt" },
+      contentType: "text/plain",
+      source: bytes("hello"),
+    });
+    expect(out.data).toEqual({ id: "new" });
+    expect(requests).toHaveLength(1);
+    const url = new URL(requests[0].url);
+    expect(url.pathname).toBe("/upload/drive/v3/files");
+    expect(url.searchParams.get("uploadType")).toBe("multipart");
+    const body = Buffer.from(requests[0].init.body as Uint8Array).toString();
+    expect(body).toContain('"name":"note.txt"');
+    expect(body).toContain("hello");
+  });
+
+  it("the attachment save is the two primitives back to back: one read, one upload, base64url decoded", async () => {
+    const { client, requests } = clientWithFetch((url) =>
+      url.includes("/attachments/")
+        ? ok({ size: 2, data: Buffer.from("hi").toString("base64url") })
+        : ok({ id: "d1", name: "a.txt" })
+    );
+    const out = await client.gmailAttachmentToDrive({ messageId: "m", attachmentId: "a", name: "a.txt", parent: "p" });
+    expect(out.data).toEqual({ id: "d1", name: "a.txt" });
+    expect(requests.map((r) => new URL(r.url).pathname)).toEqual([
+      "/gmail/v1/users/me/messages/m/attachments/a",
+      "/upload/drive/v3/files",
+    ]);
+    const body = Buffer.from(requests[1].init.body as Uint8Array).toString();
+    expect(body).toContain('"parents":["p"]');
+    expect(body).toMatch(/\r\n\r\nhi\r\n--/);
+  });
+});

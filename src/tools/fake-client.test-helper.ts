@@ -43,7 +43,26 @@ export function fakeClient(
     calls.push({ transfer });
     return next();
   });
-  return { client: { api, helper, fetchText, gmailAttachmentToDrive } as unknown as GwsClient, calls };
+  // upload entries carry `upload` (the source is drained so a test can read
+  // the bytes a handler sent); download entries carry `download`, and the
+  // plan step's `text` is what the stream yields.
+  const upload = vi.fn(async (service, resource, method, opts) => {
+    const held: Buffer[] = [];
+    for await (const chunk of opts.source as AsyncIterable<Uint8Array>) held.push(Buffer.from(chunk));
+    const { source: _source, ...rest } = opts;
+    calls.push({ upload: true, service, resource, method, ...rest, bytes: Buffer.concat(held) });
+    return next();
+  });
+  const download = vi.fn(async (service, resource, method, params) => {
+    calls.push({ download: true, service, resource, method, params });
+    const s = step();
+    const body = new TextEncoder().encode(s.text ?? "");
+    return { stream: new Response(body).body!, size: body.length };
+  });
+  return {
+    client: { api, helper, fetchText, gmailAttachmentToDrive, upload, download } as unknown as GwsClient,
+    calls,
+  };
 }
 
 /** The JSON body a handler wrapped in its MCP response envelope. */

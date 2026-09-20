@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { readdirSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 /* A token-bearing client must never start a process, and must never load the
  * module that can (SCRUM-289). Both are made to throw, so reaching either is
@@ -22,6 +25,7 @@ vi.mock("../cli-transport.js", () => {
 });
 
 const { GwsClient, TransientGwsError } = await import("../gws-client.js");
+const { sendAuthorized } = await import("./direct-transport.js");
 
 // Shaped like a real Google access token so a leak is unmistakable.
 const TOKEN = "ya29.SECRET-bearer-0123456789";
@@ -315,5 +319,53 @@ describe("the error code echoed from a network failure is only ever a code", () 
     const err = (await new GwsClient({ accessToken: TOKEN }).api("tasks", "tasklists", "list").catch((e: Error) => e)) as Error;
     expect(err.message).not.toContain(TOKEN);
     expect(err.message).toContain("network error");
+  });
+});
+
+/* "THE ONE PLACE THE TOKEN IS USED" is a claim about the whole source tree,
+ * so the tree is what gets read. Comments are stripped first: prose quoting
+ * the header would otherwise satisfy or break the count on its own. */
+describe("the token is put on the wire in one place (SCRUM-289)", () => {
+  const srcRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const sources = (dir: string): string[] =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+      e.isDirectory()
+        ? sources(path.join(dir, e.name))
+        : e.name.endsWith(".ts") && !e.name.endsWith(".test.ts") && !e.name.includes("test-helper")
+          ? [path.join(dir, e.name)]
+          : []
+    );
+  const code = (file: string) =>
+    readFileSync(file, "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/^\s*\/\/.*$/gm, "");
+
+  it("one Bearer header and one fetch call in src, both in sendAuthorized's file", () => {
+    const files = sources(srcRoot);
+    expect(files.length).toBeGreaterThan(20);
+    const hits = (re: RegExp) =>
+      files.flatMap((f) => (code(f).match(re) ?? []).map(() => path.relative(srcRoot, f)));
+    expect(hits(/Bearer \$\{/g)).toEqual([path.join("google-api", "direct-transport.ts")]);
+    expect(hits(/(?<![.\w])fetch\(/g)).toEqual([path.join("google-api", "direct-transport.ts")]);
+  });
+
+  it("the default destination is the API rule: docs.google.com is refused unless asked for by name", async () => {
+    const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}"));
+    const target = { method: "GET", url: "https://docs.google.com/spreadsheets/d/s/gviz/tq" };
+    await expect(sendAuthorized("tok", target, "t", { timeout: 1000 })).rejects.toThrow(/non-Google URL/);
+    expect(spy).not.toHaveBeenCalled();
+    await sendAuthorized("tok", target, "t", { timeout: 1000, destination: "visualization" });
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0][1]?.redirect).toBe("manual");
+    spy.mockRestore();
+  });
+
+  it("the visualization destination is not a wider door: an arbitrary googleapis host is refused there", async () => {
+    const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}"));
+    await expect(
+      sendAuthorized("tok", { method: "GET", url: "https://evil.googleapis.com/x" }, "t", { timeout: 1000, destination: "visualization" })
+    ).rejects.toThrow(/only reaches Google origins/);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
   });
 });

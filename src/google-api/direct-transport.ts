@@ -1,4 +1,4 @@
-import { buildRequest, requestUrl, type BuiltRequest } from "./request.js";
+import { buildRequest, requestUrl, type BuiltRequest, supportsMediaDownload } from "./request.js";
 import { TransientGwsError, isTransient } from "./errors.js";
 
 /** One default per call; media moves more bytes and gets longer (SCRUM-289). */
@@ -134,23 +134,60 @@ export function assertGoogleApiUrl(url: string): URL {
   return parsed;
 }
 
+/** The one surface outside the API hosts that takes the token: the
+ * Visualization query endpoint behind sheets_query, which is not a
+ * Discovery-based API and lives on docs.google.com. Exact hosts, no suffix
+ * match: docs.google.com has no subdomains this client should ever reach. */
+const VISUALIZATION_HOSTS: ReadonlySet<string> = new Set(["docs.google.com", "www.googleapis.com"]);
+export function assertVisualizationUrl(url: string): URL {
+  const parsed = new URL(url);
+  if (
+    parsed.protocol !== "https:" ||
+    !VISUALIZATION_HOSTS.has(parsed.hostname) ||
+    parsed.port !== "" ||
+    parsed.username !== "" ||
+    parsed.password !== ""
+  ) {
+    throw new Error("fetchText only reaches Google origins.");
+  }
+  return parsed;
+}
+
+/** Where a request may carry the token, by name. A caller picks a
+ * destination; it cannot supply its own rule. Neither follows a redirect:
+ * `error` refuses one, `manual` hands the 3xx back unfollowed, which is what
+ * the query endpoint's caller reads the status from. */
+const DESTINATIONS = {
+  api: { assert: assertGoogleApiUrl, redirect: "error" },
+  visualization: { assert: assertVisualizationUrl, redirect: "manual" },
+} as const;
+export type Destination = keyof typeof DESTINATIONS;
+
 /** THE ONE PLACE THE TOKEN IS USED. It goes into the Authorization header and
- * nowhere else: not a URL, not a log line, not an error. Redirects are an
- * error rather than followed, so the header cannot be replayed elsewhere. */
+ * nowhere else: not a URL, not a log line, not an error. The URL is checked
+ * against the destination's rule before anything is sent, and a redirect is
+ * never followed, so the header cannot be replayed elsewhere. A test reads
+ * the source tree to hold this comment to its word. */
 export async function sendAuthorized(
   token: string,
   target: { method: string; url: string },
   label: string,
-  init: { body?: string | Uint8Array; headers?: Record<string, string>; timeout: number }
+  init: {
+    body?: string | Uint8Array;
+    headers?: Record<string, string>;
+    timeout: number;
+    destination?: Destination;
+  }
 ): Promise<Response> {
-  assertGoogleApiUrl(target.url);
+  const { assert, redirect } = DESTINATIONS[init.destination ?? "api"];
+  assert(target.url);
   try {
     return await fetch(target.url, {
       method: target.method,
       headers: { Authorization: `Bearer ${token}`, ...init.headers },
       body: init.body as BodyInit | undefined,
       signal: AbortSignal.timeout(init.timeout),
-      redirect: "error",
+      redirect,
     });
   } catch (err) {
     throwNetworkError(err, label);
@@ -242,15 +279,25 @@ export async function directApi(
   return { success: true, data: pages.join("\n") };
 }
 
-/** Open a media download (`alt=media`) and hand back the byte stream. */
+export interface DownloadResult {
+  stream: ReadableStream<Uint8Array>;
+  contentType?: string;
+  size?: number;
+}
+
+/** Open a response as a byte stream instead of reading it into memory. A
+ * method Discovery marks as a media download is asked for `alt=media`; any
+ * other method (a Gmail attachment, whose bytes arrive inside JSON) streams
+ * the body it has. The caller owns the stream and its size. */
 export async function directDownload(
   token: string,
   service: string,
   resource: string,
   method: string,
   params: Record<string, unknown>
-): Promise<{ stream: ReadableStream<Uint8Array>; contentType?: string; size?: number }> {
-  const request = buildRequest(service, resource, method, { params: { ...params, alt: "media" } });
+): Promise<DownloadResult> {
+  const media = supportsMediaDownload(service, resource, method);
+  const request = buildRequest(service, resource, method, { params: media ? { ...params, alt: "media" } : params });
   const label = `${service} ${resource} ${method}`;
   const res = await send(token, request, label, { timeout: MEDIA_TIMEOUT_MS });
   if (!res.ok) throwApiError(res.status, await readCapped(res, label));

@@ -97,7 +97,9 @@ function toolTuples(): string[] {
     if (!file.endsWith(".ts") || file.endsWith(".test.ts") || file.includes("test-helper")) continue;
     const source = readFileSync(path.join(dir, file), "utf8");
     callSites += (source.match(/\.api\(/g) ?? []).length;
-    for (const m of source.matchAll(/\.api\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*,\s*"([^"]+)"/g)) {
+    // upload and download are the media primitives on the same client; a
+    // tool that calls one names a tuple exactly as api() does.
+    for (const m of source.matchAll(/\.(?:api|upload|download)\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*,\s*"([^"]+)"/g)) {
       literalSites++;
       found.add(`${m[1]} ${m[2]}.${m[3]}`);
     }
@@ -106,7 +108,7 @@ function toolTuples(): string[] {
   // (the attachment read, the Drive upload). They count too.
   const clientSource = readFileSync(path.join(root, "src", "gws-client.ts"), "utf8");
   for (const m of clientSource.matchAll(
-    /(?:buildRequest\(|directUpload\(\s*token,)\s*"([^"]+)"\s*,\s*"([^"]+)"\s*,\s*"([^"]+)"/g
+    /this\.(?:download|upload)\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*,\s*"([^"]+)"/g
   )) {
     found.add(`${m[1]} ${m[2]}.${m[3]}`);
   }

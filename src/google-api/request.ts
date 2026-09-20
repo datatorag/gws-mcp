@@ -69,6 +69,11 @@ function scalar(value: unknown): string {
   return typeof value === "string" ? value : JSON.stringify(value);
 }
 
+/** Whether Discovery marks the method as a media download (`alt=media`). */
+export function supportsMediaDownload(service: string, resource: string, method: string): boolean {
+  return lookup(service, resource, method).entry.mediaDownload === true;
+}
+
 export function buildRequest(
   service: string,
   resource: string,

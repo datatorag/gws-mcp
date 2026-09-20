@@ -5,14 +5,14 @@ import { fileURLToPath } from "node:url";
 import {
   DEFAULT_TIMEOUT_MS,
   directApi,
+  directDownload,
   readCapped,
   sendAuthorized,
-  throwApiError,
   type ApiOptions,
   type ApiResult,
+  type DownloadResult,
 } from "./google-api/direct-transport.js";
-import { directUpload, gmailAttachmentBytes } from "./google-api/direct-upload.js";
-import { buildRequest, requestUrl } from "./google-api/request.js";
+import { directUpload, gmailAttachmentBytes, type UploadOptions } from "./google-api/direct-upload.js";
 import type { CliTransport } from "./cli-transport.js";
 
 export { DEFAULT_SERVICES, REQUIRED_SCOPE_KEYWORDS, scopesForServices } from "./scopes.js";
@@ -80,11 +80,7 @@ export interface GwsClientOptions {
   accessToken?: string;
 }
 
-/** The only origins fetchText will carry the access token to. */
-const ALLOWED_FETCH_ORIGINS: ReadonlySet<string> = new Set([
-  "https://docs.google.com",
-  "https://www.googleapis.com",
-]);
+const NEEDS_TOKEN = "This call needs an access token; connect the account through the gateway and try again.";
 
 /** The client every tool calls.
  *
@@ -134,19 +130,15 @@ export class GwsClient {
    * would answer with a login page for any private file. */
   async fetchText(url: string, options?: { timeout?: number }): Promise<{ status: number; text: string }> {
     const token = this.defaultAccessToken;
-    if (!token) {
-      throw new Error("This call needs an access token; connect the account through the gateway and try again.");
-    }
+    if (!token) throw new Error(NEEDS_TOKEN);
     // The token goes only to Google. A general authenticated GET would be a
     // token-exfiltration primitive the moment a caller built its URL from
-    // user input, so the origin is pinned here, not left to each caller.
-    if (!ALLOWED_FETCH_ORIGINS.has(new URL(url).origin)) {
-      throw new Error("fetchText only reaches Google origins.");
-    }
-    const res = await fetch(url, {
-      headers: { Authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(options?.timeout ?? 30_000),
-      redirect: "manual",
+    // user input, so the hosts are pinned by the transport's "visualization"
+    // destination, not left to each caller, and the request goes through the
+    // same guarded send as every API call.
+    const res = await sendAuthorized(token, { method: "GET", url }, "fetchText", {
+      timeout: options?.timeout ?? DEFAULT_TIMEOUT_MS,
+      destination: "visualization",
     });
     return { status: res.status, text: await readCapped(res, "fetchText") };
   }
@@ -158,6 +150,29 @@ export class GwsClient {
     return (await this.cli()).api(service, resource, method, options);
   }
 
+  /** Send bytes to a method that accepts media (Drive files.create, Gmail
+   * drafts and messages). `source` is consumed as it is sent, in bounded
+   * chunks, so the caller never holds the whole file. Needs a token: the CLI
+   * fallback has no streaming upload. */
+  async upload(service: string, resource: string, method: string, options: UploadOptions): Promise<GwsResult> {
+    const token = this.defaultAccessToken;
+    if (!token) throw new Error(NEEDS_TOKEN);
+    return directUpload(token, service, resource, method, options);
+  }
+
+  /** Open a response as a byte stream: `alt=media` where the method supports
+   * it, the plain body otherwise. Needs a token, as upload does. */
+  async download(
+    service: string,
+    resource: string,
+    method: string,
+    params: Record<string, unknown>
+  ): Promise<DownloadResult> {
+    const token = this.defaultAccessToken;
+    if (!token) throw new Error(NEEDS_TOKEN);
+    return directDownload(token, service, resource, method, params);
+  }
+
   /** Copy one Gmail attachment into Drive without the bytes passing through
    * the conversation. With a token the attachment is decoded as it streams
    * in and uploaded in bounded chunks; nothing touches the disk. */
@@ -167,26 +182,20 @@ export class GwsClient {
     name: string;
     parent?: string;
   }): Promise<GwsResult> {
-    const token = this.defaultAccessToken;
-    if (!token) return (await this.cli()).gmailAttachmentToDrive(args);
+    if (!this.defaultAccessToken) return (await this.cli()).gmailAttachmentToDrive(args);
 
-    const request = buildRequest("gmail", "users.messages.attachments", "get", {
-      params: { userId: "me", messageId: args.messageId, id: args.attachmentId },
+    const attachment = await this.download("gmail", "users.messages.attachments", "get", {
+      userId: "me",
+      messageId: args.messageId,
+      id: args.attachmentId,
     });
-    const label = "gmail users.messages.attachments get";
-    const res = await sendAuthorized(token, { method: request.method, url: requestUrl(request) }, label, {
-      timeout: DEFAULT_TIMEOUT_MS * 4,
-    });
-    if (!res.ok) throwApiError(res.status, await readCapped(res, label));
-    if (!res.body) throw new Error("No attachment data returned from Gmail API");
-
-    return directUpload(token, "drive", "files", "create", {
+    return this.upload("drive", "files", "create", {
       params: { supportsAllDrives: true, fields: "id,name,mimeType,size,webViewLink,parents" },
       metadata: { name: args.name, ...(args.parent ? { parents: [args.parent] } : {}) },
       // No type is claimed for the bytes, so Drive detects it from the name
       // and content, as it did for the CLI's upload of an extensionless file.
       contentType: "application/octet-stream",
-      source: gmailAttachmentBytes(res.body as unknown as AsyncIterable<Uint8Array>),
+      source: gmailAttachmentBytes(attachment.stream as unknown as AsyncIterable<Uint8Array>),
     });
   }
 
