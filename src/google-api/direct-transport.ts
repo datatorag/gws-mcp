@@ -181,10 +181,15 @@ export async function sendAuthorized(
 ): Promise<Response> {
   const { assert, redirect } = DESTINATIONS[init.destination ?? "api"];
   assert(target.url);
+  // Caller headers go in first and lose: no spelling of Authorization from a
+  // caller survives, because fetch would join two spellings into one value.
+  const headers = Object.fromEntries(
+    Object.entries(init.headers ?? {}).filter(([name]) => name.toLowerCase() !== "authorization")
+  );
   try {
     return await fetch(target.url, {
       method: target.method,
-      headers: { Authorization: `Bearer ${token}`, ...init.headers },
+      headers: { ...headers, Authorization: `Bearer ${token}` },
       body: init.body as BodyInit | undefined,
       signal: AbortSignal.timeout(init.timeout),
       redirect,

@@ -311,6 +311,55 @@ describe("a path value cannot leave its method's path", () => {
   });
 });
 
+describe("a path value is a plain id (SCRUM-289 follow-up)", () => {
+  it.each([
+    ["an empty middle segment", "people//c1"],
+    ["a leading slash", "/people/c1"],
+    ["a trailing slash", "people/c1/"],
+  ])("a slash-keeping value with %s is refused before any request", async (_, resourceName) => {
+    const requests = withFetch(() => json({}));
+    await expect(
+      new GwsClient({ accessToken: TOKEN }).api("people", "people", "get", { params: { resourceName, personFields: "names" } })
+    ).rejects.toThrow(/must not contain an empty segment/);
+    expect(requests).toHaveLength(0);
+  });
+
+  it.each([
+    ["an array", ["a", ".."]],
+    ["an object", { id: "a" }],
+    ["a boolean", true],
+  ])("%s as a path value is refused by type, not coerced into the URL", async (_, fileId) => {
+    const requests = withFetch(() => json({}));
+    await expect(
+      new GwsClient({ accessToken: TOKEN }).api("drive", "files", "get", { params: { fileId } })
+    ).rejects.toThrow(/path parameter "fileId" must be a string or a number/);
+    expect(requests).toHaveLength(0);
+  });
+
+  it("a number is still a path value", async () => {
+    const requests = withFetch(() => json({}));
+    await new GwsClient({ accessToken: TOKEN }).api("drive", "files", "get", { params: { fileId: 42 } });
+    expect(new URL(requests[0].url).pathname).toBe("/drive/v3/files/42");
+  });
+});
+
+describe("a caller's headers cannot replace the token (SCRUM-289 follow-up)", () => {
+  it.each([["Authorization"], ["authorization"], ["AUTHORIZATION"]])(
+    "a caller-supplied %s header is dropped, in any letter case, and the rest are kept",
+    async (name) => {
+      const spy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}"));
+      await sendAuthorized("tok", { method: "GET", url: "https://www.googleapis.com/drive/v3/files" }, "t", {
+        timeout: 1000,
+        headers: { [name]: "Bearer someone-else", "Content-Type": "text/plain" },
+      });
+      const sent = new Headers(spy.mock.calls[0][1]?.headers as Record<string, string>);
+      expect(sent.get("authorization")).toBe("Bearer tok");
+      expect(sent.get("content-type")).toBe("text/plain");
+      spy.mockRestore();
+    }
+  );
+});
+
 describe("the error code echoed from a network failure is only ever a code", () => {
   it("drops a code that does not look like one, even if it carries the token", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async () => {

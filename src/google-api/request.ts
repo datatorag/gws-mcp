@@ -94,6 +94,14 @@ export function buildRequest(
     if (value === undefined || value === null || value === "") {
       throw new Error(`Validation error: missing required path parameter "${name}" for ${service} ${resource} ${method}.`);
     }
+    if (typeof value !== "string" && typeof value !== "number") {
+      throw new Error(`Validation error: path parameter "${name}" must be a string or a number.`);
+    }
+    // An empty segment in a slash-keeping value ("a//b", a leading or
+    // trailing slash) names nothing; refused so the path sent is the path meant.
+    if (plus && String(value).split("/").includes("")) {
+      throw new Error(`Validation error: path parameter "${name}" must not contain an empty segment.`);
+    }
     // A dot segment is refused, not encoded. `.` goes out as %2E, and URL
     // parsing treats %2E%2E exactly like `..`, so an id of "../../x" would
     // leave this method's path for another on the same host, under a tool

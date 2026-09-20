@@ -182,7 +182,12 @@ function cellValue(cell: GvizCell, type: string | undefined): unknown {
 const NO_COLUMN = /NO_COLUMN:\s*([A-Za-z0-9_]+)/;
 
 export async function runSheetsQuery(client: GwsClient, args: Record<string, unknown>) {
-  const spreadsheetId = args.spreadsheet_id as string;
+  // The id becomes a path segment on the one non-API host that takes the
+  // token. Encoding keeps it on that host; this keeps it on that path.
+  const spreadsheetId = args.spreadsheet_id;
+  if (typeof spreadsheetId !== "string" || !/^[A-Za-z0-9_-]+$/.test(spreadsheetId)) {
+    throw new Error("sheets_query: spreadsheet_id must be the ID from the spreadsheet's URL (letters, digits, - and _).");
+  }
   const asWritten = typeof args.query === "string" ? args.query.trim() : "";
   if (asWritten === "") throw new Error("sheets_query: query must not be blank.");
   const range = typeof args.range === "string" ? args.range : undefined;

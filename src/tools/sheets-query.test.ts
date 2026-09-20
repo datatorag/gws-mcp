@@ -231,3 +231,26 @@ describe("sheets_query Col1-style names (SCRUM-268)", () => {
     await expect(err).rejects.not.toThrow(/outside the range/);
   });
 });
+
+/* SCRUM-289 follow-up. The id becomes a path segment on docs.google.com, the
+ * one host outside the API that takes the token. Encoding keeps it on that
+ * host, but ".." still moves the request to another path there, so the id
+ * is held to the alphabet Google's ids are written in. */
+describe("sheets_query refuses a spreadsheet id that is not an id", () => {
+  it.each([[".."], ["."], ["a/b"], ["a?b"], ["a#b"], ["a b"], ["%2e%2e"], [""], [42], [undefined]])(
+    "%j is refused before any request",
+    async (spreadsheet_id) => {
+      const { client, calls } = fakeClient([{ text: "unused" }]);
+      await expect(handleSheetsQuery(client, "sheets_query", { spreadsheet_id, query: "select A" })).rejects.toThrow(
+        /spreadsheet_id must be the ID from the spreadsheet's URL/
+      );
+      expect(calls).toHaveLength(0);
+    }
+  );
+
+  it("an id with every allowed character still goes out, unchanged", async () => {
+    const { client, calls } = fakeClient([{ text: wrap(TABLE) }]);
+    await handleSheetsQuery(client, "sheets_query", { spreadsheet_id: "Ab3_x-Yz9", query: "select A" });
+    expect(String(calls[0].url)).toContain("/spreadsheets/d/Ab3_x-Yz9/gviz/tq");
+  });
+});
