@@ -469,8 +469,9 @@ type MatchedValueRange = {
  * first real calls came back sorted by something else), but each answer
  * echoes the filter it matched. That echo places it; the echoed range is the
  * second key, for an answer with no filter; position among what is still
- * unplaced is the last resort. A request nothing answered gets an empty
- * block in its place, so the caller can index by position and read the
+ * unplaced is the last resort. A range requested more than once gets the
+ * same answer in every slot (SCRUM-297). A request nothing answered gets an
+ * empty block in its place, so the caller can index by position and read the
  * right cell every time. */
 export function placeByRequest(
   requested: string[],
@@ -491,6 +492,20 @@ export function placeByRequest(
   answers.forEach((a, i) => place(i, slotFor(a.dataFilters?.[0]?.a1Range)));
   answers.forEach((a, i) => {
     if (!used.has(i)) place(i, slotFor(a.valueRange?.range));
+  });
+  // A range asked for more than once (SCRUM-297). The API merges identical
+  // filters into ONE answer, so placement fills the first slot and leaves
+  // the repeats empty, the same shape as a range nothing answered. A repeat
+  // takes the answer its first occurrence got. This runs before the
+  // positional last resort, so an answer with no echo cannot land in a slot
+  // whose range is already answered.
+  const byKey = new Map<string, MatchedValueRange>();
+  requested.forEach((req, j) => {
+    const answer = placed[j];
+    if (answer !== undefined && !byKey.has(a1Key(req))) byKey.set(a1Key(req), answer);
+  });
+  requested.forEach((req, j) => {
+    if (placed[j] === undefined) placed[j] = byKey.get(a1Key(req));
   });
   let cursor = 0;
   answers.forEach((_, i) => {

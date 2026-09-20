@@ -836,3 +836,74 @@ describe("sheets_read ranges[] keeps the request order (SCRUM-253)", () => {
     expect(result.blocks[2].values).toEqual([["qty"]]);
   });
 });
+
+/* SCRUM-297: a range asked for twice gets its data twice. Measured against
+ * the live API: values.batchGetByDataFilter sent three filters, two of them
+ * identical, answers with TWO matched value ranges, and the merged one lists
+ * both filters it matched. One answer cannot fill two slots by placement
+ * alone, so the second slot used to come back as an empty block, the same
+ * shape as a range nothing answered. */
+describe("sheets_read ranges[] answers a repeated range every time (SCRUM-297)", () => {
+  const A = { range: "Inventory!A1:B2", values: [["sku", "qty"], ["a-1", "4"]] };
+  const B = { range: "Inventory!D1", values: [["total"]] };
+  const read = async (ranges: string[], valueRanges: unknown[]) => {
+    const { client } = fakeClient([{ data: { valueRanges } }]);
+    return payload(await handleSheets(client, "sheets_read", { spreadsheet_id: "s", ranges })).blocks;
+  };
+
+  it("[A, B, A] with one answer per distinct range: slots 0 and 2 are equal, slot 1 is B", async () => {
+    const blocks = await read(
+      ["Inventory!A1:B2", "Inventory!D1", "Inventory!A1:B2"],
+      [
+        // The measured shape: the merged answer echoes the filter twice.
+        { dataFilters: [{ a1Range: "Inventory!A1:B2" }, { a1Range: "Inventory!A1:B2" }], valueRange: A },
+        { dataFilters: [{ a1Range: "Inventory!D1" }], valueRange: B },
+      ]
+    );
+    expect(blocks).toHaveLength(3);
+    expect(blocks[0].values).toEqual(A.values);
+    expect(blocks[2]).toEqual(blocks[0]);
+    expect(blocks[1]).toEqual({ range: "Inventory!D1", rowCount: 1, columnCount: 1, values: [["total"]] });
+  });
+
+  it("[A, A] answered once: two equal blocks", async () => {
+    const blocks = await read(
+      ["Inventory!A1:B2", "Inventory!A1:B2"],
+      [{ dataFilters: [{ a1Range: "Inventory!A1:B2" }, { a1Range: "Inventory!A1:B2" }], valueRange: A }]
+    );
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].rowCount).toBe(2);
+    expect(blocks[1]).toEqual(blocks[0]);
+  });
+
+  it("[A, B] where nothing answers B: slot 1 stays empty, it does not borrow A", async () => {
+    const blocks = await read(
+      ["Inventory!A1:B2", "Inventory!D1"],
+      [{ dataFilters: [{ a1Range: "Inventory!A1:B2" }], valueRange: A }]
+    );
+    expect(blocks[0].values).toEqual(A.values);
+    expect(blocks[1]).toEqual({ range: "Inventory!D1", rowCount: 0, columnCount: 0, values: [] });
+  });
+
+  it("two spellings of the same cells are the same range: quoted tab, letter case, repeated corner", async () => {
+    const blocks = await read(
+      ["Inventory!A1:B2", "'Inventory'!A1:B2", "inventory!a1:b2", "Inventory!D1:D1"],
+      [
+        { dataFilters: [{ a1Range: "Inventory!A1:B2" }], valueRange: A },
+        { dataFilters: [{ a1Range: "Inventory!D1:D1" }], valueRange: B },
+      ]
+    );
+    expect(blocks[1]).toEqual(blocks[0]);
+    expect(blocks[2]).toEqual(blocks[0]);
+    expect(blocks[3].values).toEqual([["total"]]);
+  });
+
+  it("a repeated range is filled before the positional last resort, so an answer with no echo cannot take its slot", async () => {
+    const blocks = await read(
+      ["Inventory!A1:B2", "Inventory!A1:B2", "Inventory!D1"],
+      [{ dataFilters: [{ a1Range: "Inventory!A1:B2" }], valueRange: A }, { valueRange: { values: [["total"]] } }]
+    );
+    expect(blocks[1].values).toEqual(A.values);
+    expect(blocks[2].values).toEqual([["total"]]);
+  });
+});
