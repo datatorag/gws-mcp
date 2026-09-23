@@ -104,13 +104,8 @@ export async function directUpload(
       timeout: MEDIA_TIMEOUT_MS,
       destination: "uploadSession",
     });
-    // A 308 is Resume Incomplete only when it names no Location. Anything that
-    // names one, and any other 3xx, is a real redirect, and it is refused
-    // rather than followed: the next request would carry the token.
-    if (res.status >= 300 && res.status < 400 && (res.status !== 308 || res.headers.get("location"))) {
-      await res.body?.cancel().catch(() => {});
-      throw new Error(`${label}: the upload session answered with a redirect (${res.status}), which is refused.`);
-    }
+    // Redirects are refused inside sendAuthorized for this destination; what
+    // reaches here is a Location-free 308 or a final answer.
     offset = end;
     if (last) {
       const text = await readCapped(res, label);

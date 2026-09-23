@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { MockAgent, getGlobalDispatcher, setGlobalDispatcher, type Dispatcher } from "undici";
 import { RESUMABLE_CHUNK, directUpload } from "./direct-upload.js";
+import { sendAuthorized } from "./direct-transport.js";
 
 /**
  * The resumable upload through Node's REAL fetch (SCRUM-289).
@@ -93,6 +94,27 @@ describe("a resumable upload through the real fetch", () => {
         source: bytes(RESUMABLE_CHUNK + 10),
       })
     ).rejects.toThrow(/redirect/i);
+  });
+
+  it("the uploadSession destination refuses a redirect itself, whoever calls it", async () => {
+    // The refusal lives in sendAuthorized, so a future caller that picks this
+    // destination cannot forget it. A Location-free 308 is the only 3xx that
+    // comes back; a 302, or a 308 naming somewhere, is refused unfollowed.
+    const google = agent.get(ORIGIN);
+    google.intercept({ path: "/upload/a", method: "PUT" }).reply(302, "", { headers: { location: "https://elsewhere.example/" } });
+    google.intercept({ path: "/upload/b", method: "PUT" }).reply(308, "", { headers: { location: "https://elsewhere.example/" } });
+    google.intercept({ path: "/upload/c", method: "PUT" }).reply(308, "", { headers: { range: "bytes=0-9" } });
+    const put = (path: string) =>
+      sendAuthorized(TOKEN, { method: "PUT", url: `${ORIGIN}${path}` }, "t", {
+        body: Buffer.from("0123456789"),
+        timeout: 5000,
+        destination: "uploadSession",
+      });
+    await expect(put("/upload/a")).rejects.toThrow(/redirect \(302\)/);
+    await expect(put("/upload/b")).rejects.toThrow(/redirect \(308\)/);
+    const ok = await put("/upload/c");
+    expect(ok.status).toBe(308);
+    await ok.body?.cancel();
   });
 
   it("refuses a 308 whose Range says Google holds fewer bytes than were sent", async () => {

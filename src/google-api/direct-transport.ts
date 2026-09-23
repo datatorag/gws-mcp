@@ -154,19 +154,22 @@ export function assertVisualizationUrl(url: string): URL {
 }
 
 /** Where a request may carry the token, by name. A caller picks a
- * destination; it cannot supply its own rule. Neither follows a redirect:
- * `error` refuses one, `manual` hands the 3xx back unfollowed, which is what
- * the query endpoint's caller reads the status from. */
+ * destination; it cannot supply its own rule. None of them follows a
+ * redirect: `error` refuses one, and `manual` hands the 3xx back unfollowed.
+ *
+ * - `api`: every ordinary API call. A redirect is a network error.
+ * - `visualization`: the query endpoint, whose caller reads the 3xx status.
+ * - `uploadSession`: a resumable upload's chunks. Google answers each
+ *   intermediate chunk with 308 Resume Incomplete, which fetch treats as a
+ *   redirect, so under `error` every resumable upload died on its first chunk
+ *   with a bare TypeError. Here the 308 comes back unfollowed, and
+ *   sendAuthorized itself refuses any 3xx that is not a Location-free 308
+ *   (`resumeOnly`), so no caller can select this destination without the
+ *   check. */
 const DESTINATIONS = {
-  api: { assert: assertGoogleApiUrl, redirect: "error" },
-  visualization: { assert: assertVisualizationUrl, redirect: "manual" },
-  // A resumable upload session answers every intermediate chunk with 308
-  // Resume Incomplete. fetch treats any 308 as a redirect, and under "error"
-  // a redirect is a network error, so every resumable upload died on its
-  // first chunk with a bare TypeError. "manual" hands the 308 back unfollowed;
-  // the upload loop then refuses any 3xx that is not a Location-free 308, so
-  // the token is still never replayed anywhere.
-  uploadSession: { assert: assertGoogleApiUrl, redirect: "manual" },
+  api: { assert: assertGoogleApiUrl, redirect: "error", resumeOnly: false },
+  visualization: { assert: assertVisualizationUrl, redirect: "manual", resumeOnly: false },
+  uploadSession: { assert: assertGoogleApiUrl, redirect: "manual", resumeOnly: true },
 } as const;
 export type Destination = keyof typeof DESTINATIONS;
 
@@ -186,15 +189,16 @@ export async function sendAuthorized(
     destination?: Destination;
   }
 ): Promise<Response> {
-  const { assert, redirect } = DESTINATIONS[init.destination ?? "api"];
+  const { assert, redirect, resumeOnly } = DESTINATIONS[init.destination ?? "api"];
   assert(target.url);
   // Caller headers go in first and lose: no spelling of Authorization from a
   // caller survives, because fetch would join two spellings into one value.
   const headers = Object.fromEntries(
     Object.entries(init.headers ?? {}).filter(([name]) => name.toLowerCase() !== "authorization")
   );
+  let res: Response;
   try {
-    return await fetch(target.url, {
+    res = await fetch(target.url, {
       method: target.method,
       headers: { ...headers, Authorization: `Bearer ${token}` },
       body: init.body as BodyInit | undefined,
@@ -204,6 +208,14 @@ export async function sendAuthorized(
   } catch (err) {
     throwNetworkError(err, label);
   }
+  // A 308 is Resume Incomplete only when it names no Location. Anything that
+  // names one, and any other 3xx, is a real redirect: refused here, never
+  // followed, since following it would carry the token somewhere else.
+  if (resumeOnly && res.status >= 300 && res.status < 400 && (res.status !== 308 || res.headers.get("location"))) {
+    await res.body?.cancel().catch(() => {});
+    throw new Error(`${label}: the upload session answered with a redirect (${res.status}), which is refused.`);
+  }
+  return res;
 }
 
 function send(
