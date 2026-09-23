@@ -74,7 +74,12 @@ export function signatureHtmlBlock(sigHtml: string): string {
 }
 
 export function appendHtmlSignature(html: string, sigHtml: string): string {
-  const block = signatureHtmlBlock(sigHtml);
+  return appendToHtml(html, signatureHtmlBlock(sigHtml));
+}
+
+/** Put a block at the end of an HTML body: inside a closing `</body>` when
+ * the body has one, otherwise after the last byte. */
+export function appendToHtml(html: string, block: string): string {
   // Only the tail can hold the closing tag, and lowercasing the whole body to
   // find a 7-character token allocates a full UTF-16 copy of it — GC pressure
   // every other tenant on this loop pays for.

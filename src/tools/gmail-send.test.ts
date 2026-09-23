@@ -843,10 +843,45 @@ describe("gmail_send_draft signs the stored MIME (SCRUM-278)", () => {
       "--m1--",
       ""
     );
-    const { client, calls } = fakeClient([draftGet(mixed), sendAs(), { data: { id: "m1" } }]);
+    // SCRUM-279: a draft with files is signed in its text part, and the file
+    // travels back byte for byte.
+    const { client, calls } = fakeClient([draftGet(mixed), sendAs(), { data: {} }, { data: { id: "m1" } }]);
     const res = await handleGmail(client, "gmail_send_draft", { draft_id: "d1" });
-    expect(calls.map((c) => c.method)).toEqual(["get", "list", "send"]);
-    expect(payload(res).signature).toBe("skipped_unsupported_draft");
+    expect(calls.map((c) => c.method)).toEqual(["get", "list", "update", "send"]);
+    expect(payload(res).signature).toBe("applied");
+    const updated = Buffer.from((calls[2].jsonBody as { message: { raw: string } }).message.raw, "base64url").toString("utf8");
+    expect(updated).toContain("--m1\r\nContent-Type: application/pdf; name=x.pdf\r\nContent-Transfer-Encoding: base64\r\n\r\nAAAA\r\n--m1--");
+  });
+
+  it("a signed draft too large for a JSON body goes back as an rfc822 upload", async () => {
+    const big = raw(
+      "From: a@b.c",
+      'Content-Type: multipart/mixed; boundary="m1"',
+      "",
+      "--m1",
+      "Content-Type: text/plain",
+      "",
+      "Hi",
+      "--m1",
+      "Content-Type: application/pdf; name=x.pdf",
+      "Content-Transfer-Encoding: base64",
+      "",
+      "A".repeat(2 * 1024 * 1024),
+      "--m1--",
+      ""
+    );
+    const { client, calls } = fakeClient([draftGet(big), sendAs(), { data: {} }, { data: { id: "m1" } }]);
+    const res = await handleGmail(client, "gmail_send_draft", { draft_id: "d1" });
+    expect(payload(res).signature).toBe("applied");
+    const up = calls[2];
+    expect(up.upload).toBe(true);
+    expect(`${up.resource}.${up.method}`).toBe("users.drafts.update");
+    expect(up.contentType).toBe("message/rfc822");
+    const { simpleParser } = await import("mailparser");
+    const mail = await simpleParser(up.bytes as Buffer);
+    expect(mail.html).toContain("Dana Rivers");
+    expect(mail.attachments[0].content.equals(Buffer.from("A".repeat(2 * 1024 * 1024), "base64"))).toBe(true);
+    expect(up.metadata).toEqual({ message: { threadId: "t1" } });
   });
 
   it("a retry after a failed send does not add a second signature", async () => {

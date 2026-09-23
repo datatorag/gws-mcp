@@ -227,24 +227,127 @@ describe("multipart/alternative: the HTML part only", () => {
     expect(dec(out.raw!)).toContain("--b1--");
   });
 
-  it("refuses multipart/mixed", () => {
+  // SCRUM-279: a draft with files. Only the first part is signed; every file
+  // after it is carried across byte for byte.
+  const FILE_PART = ["--m1", "Content-Type: application/pdf; name=x.pdf", "Content-Transfer-Encoding: base64", "", "JVBERi0xLjQKJfbk/N8K", "--m1--", ""];
+
+  it("signs the text first part of multipart/mixed and leaves the file's bytes untouched", async () => {
+    const draft = msg("From: a@b.c", 'Content-Type: multipart/mixed; boundary="m1"', "", "--m1", "Content-Type: text/plain", "", "Hi", ...FILE_PART);
+    const out = signDraftRaw(enc(draft), SIG);
+    expect(out.state).toBe("applied");
+    const text = dec(out.raw!);
+    expect(text.slice(text.indexOf("--m1\r\nContent-Type: application/pdf"))).toBe(FILE_PART.join("\r\n"));
+    const { simpleParser } = await import("mailparser");
+    const mail = await simpleParser(Buffer.from(text));
+    expect(mail.text?.trim()).toBe("Hi");
+    expect(mail.html).toContain("Dana Rivers");
+    expect(mail.attachments).toHaveLength(1);
+    expect(mail.attachments[0].content.equals(Buffer.from("JVBERi0xLjQKJfbk/N8K", "base64"))).toBe(true);
+    // One MIME-Version, at the top: the promoted inner part carries none.
+    expect(text.match(/MIME-Version/g) ?? []).toHaveLength(0);
+  });
+
+  it("signs mixed > related > alternative, the shape gmail_create_draft writes with an inline image and a file", async () => {
+    const draft = msg(
+      "From: a@b.c",
+      "MIME-Version: 1.0",
+      'Content-Type: multipart/mixed; boundary="m1"',
+      "",
+      "--m1",
+      'Content-Type: multipart/related; boundary="r1"; type="multipart/alternative"',
+      "",
+      "--r1",
+      'Content-Type: multipart/alternative; boundary="a1"',
+      "",
+      "--a1",
+      "Content-Type: text/plain; charset=utf-8",
+      "",
+      "Hi",
+      "--a1",
+      "Content-Type: text/html; charset=utf-8",
+      "",
+      '<p>Hi</p><img src="cid:c.png">',
+      "--a1--",
+      "",
+      "--r1",
+      "Content-Type: image/png; name=c.png",
+      "Content-Transfer-Encoding: base64",
+      "Content-ID: <c.png>",
+      "",
+      "iVBORw0K",
+      "--r1--",
+      "",
+      ...FILE_PART
+    );
+    const out = signDraftRaw(enc(draft), SIG);
+    expect(out.state).toBe("applied");
+    const { simpleParser } = await import("mailparser");
+    const mail = await simpleParser(Buffer.from(dec(out.raw!)));
+    // The parser inlines a cid image as a data: URL; the order is what counts.
+    expect(mail.html).toMatch(/<img src="data:image\/png[^"]*">.*Dana Rivers/s);
+    expect(mail.attachments.map((a) => a.filename)).toEqual(["c.png", "x.pdf"]);
+    expect(signDraftRaw(out.raw!, SIG).state).toBe("already_present");
+  });
+
+  it("a mixed draft already signed reports already_present", () => {
+    const draft = msg("From: a@b.c", 'Content-Type: multipart/mixed; boundary="m1"', "", "--m1", "Content-Type: text/html", "", "x", ...FILE_PART);
+    // text/html alone as the first part is not a shape this rewrites...
+    expect(signDraftRaw(enc(draft), SIG).state).toBe("skipped_unsupported_draft");
+    const signed = msg(
+      "From: a@b.c",
+      'Content-Type: multipart/mixed; boundary="m1"',
+      "",
+      "--m1",
+      'Content-Type: multipart/alternative; boundary="a1"',
+      "",
+      "--a1",
+      "Content-Type: text/plain",
+      "",
+      "Hi",
+      "--a1",
+      "Content-Type: text/html",
+      "",
+      `<p>Hi</p>${SIG.html}`,
+      "--a1--",
+      "",
+      ...FILE_PART
+    );
+    // ...but the alternative shape is, and a signed one is left alone.
+    expect(signDraftRaw(enc(signed), SIG).state).toBe("already_present");
+  });
+
+  it("refuses a mixed draft whose first part is itself a file", () => {
+    const draft = msg("From: a@b.c", 'Content-Type: multipart/mixed; boundary="m1"', "", ...FILE_PART.slice(0, -2), ...FILE_PART);
+    expect(signDraftRaw(enc(draft), SIG).state).toBe("skipped_unsupported_draft");
+  });
+
+  it("refuses nesting deeper than mixed > related > text", () => {
     const draft = msg(
       "From: a@b.c",
       'Content-Type: multipart/mixed; boundary="m1"',
       "",
       "--m1",
+      'Content-Type: multipart/mixed; boundary="m2"',
+      "",
+      "--m2",
       "Content-Type: text/plain",
       "",
       "Hi",
-      "--m1",
-      "Content-Type: application/pdf; name=x.pdf",
-      "Content-Transfer-Encoding: base64",
+      "--m2--",
       "",
-      "AAAA",
-      "--m1--",
-      ""
+      ...FILE_PART
     );
     expect(signDraftRaw(enc(draft), SIG).state).toBe("skipped_unsupported_draft");
+  });
+
+  it("a big file does not stop the signing, a big text part does", () => {
+    const bigFile = "A".repeat(3 * 1024 * 1024);
+    const draft = msg("From: a@b.c", 'Content-Type: multipart/mixed; boundary="m1"', "", "--m1", "Content-Type: text/plain", "", "Hi", "--m1", "Content-Type: application/pdf", "Content-Transfer-Encoding: base64", "", bigFile, "--m1--", "");
+    expect(signDraftRaw(enc(draft), SIG).state).toBe("applied");
+    const bigText = msg("From: a@b.c", 'Content-Type: multipart/mixed; boundary="m1"', "", "--m1", "Content-Type: text/plain", "", "x".repeat(1024 * 1024), ...FILE_PART);
+    expect(signDraftRaw(enc(bigText), SIG).state).toBe("skipped_unsupported_draft");
+    // And a plain text draft of the same size is still refused, as before.
+    expect(signDraftRaw(enc(msg("From: a@b.c", "Content-Type: text/plain", "", bigFile)), SIG).state).toBe("skipped_unsupported_draft");
   });
 
   it("refuses a non-text part inside multipart/alternative", () => {

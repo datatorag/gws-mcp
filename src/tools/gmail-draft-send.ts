@@ -225,17 +225,21 @@ function promotePlainDraft(
   headerBlock: string,
   rawBody: string,
   plain: string,
-  sig: Signature
-): DraftSignResult {
+  sig: Signature,
+  nested: boolean
+): string {
   const html = signHtmlBody(plainToHtml(plain), sig);
   const boundary = `=_gws_${randomUUID()}`;
   const partHeaders = [
     readHeader(headerBlock, "content-type") ?? "text/plain; charset=utf-8",
     readHeader(headerBlock, "content-transfer-encoding"),
   ];
-  const message = [
-    withoutHeaders(headerBlock, ["content-type", "content-transfer-encoding", "mime-version"]),
-    "MIME-Version: 1.0",
+  // A nested part may have had no header but its type, which leaves nothing
+  // here; an empty line at the top would end the header block early.
+  const kept = withoutHeaders(headerBlock, ["content-type", "content-transfer-encoding", "mime-version"]);
+  return [
+    ...(kept ? [kept] : []),
+    ...(nested ? [] : ["MIME-Version: 1.0"]),
     `Content-Type: multipart/alternative; boundary="${boundary}"`,
     "",
     `--${boundary}`,
@@ -251,7 +255,6 @@ function promotePlainDraft(
     `--${boundary}--`,
     "",
   ].join("\r\n");
-  return { raw: encodeRaw(message), state: "applied" };
 }
 
 /** One part of a multipart draft, located in the original message so a
@@ -267,24 +270,37 @@ interface Part {
   headers: string;
 }
 
+/** The largest stored draft WITH FILES, in base64url characters, this will
+ * rewrite. Only its first part is decoded and edited; the files are spliced
+ * back as the bytes they were, so this bounds the copy, not the work. */
+export const DRAFT_WITH_FILES_MAX_CHARS = 36 * 1024 * 1024;
+
 /** Append the account's signature to a draft's stored MIME.
  *
  * THE SIGNATURE GOES IN THE HTML PART ONLY; the plain part is never touched,
- * so only the HTML `gmail_quote` anchor matters. Two shapes are rewritten: a
- * single `text/plain` message, which gains an HTML part, and
+ * so only the HTML `gmail_quote` anchor matters. Two text shapes are
+ * rewritten: a single `text/plain` message, which gains an HTML part, and
  * `multipart/alternative` whose parts are all `text/plain` or `text/html`,
- * whose HTML part is edited in place (or added when it has none). Anything
- * else — an attachment, an inline image, a nested multipart, an encoding we
- * cannot re-emit — is reported `skipped_unsupported_draft` and sent exactly
- * as the user wrote it. */
+ * whose HTML part is edited in place (or added when it has none).
+ *
+ * A draft with files (SCRUM-279) is `multipart/mixed` or `multipart/related`
+ * whose FIRST part is one of those text shapes (or, for mixed, a related
+ * part holding one). Only that first part is signed; every file after it is
+ * carried across byte for byte and never decoded. Anything else — a nested
+ * shape past that, an encoding we cannot re-emit — is reported
+ * `skipped_unsupported_draft` and sent exactly as the user wrote it. */
 export function signDraftRaw(rawB64: string, sig: Signature): DraftSignResult {
   // Checked FIRST, not after the rewrite. Decoding, rewriting and re-encoding
   // a message is un-yielding work on an event loop every session shares, so a
   // draft past this size is sent as it stands. A text draft is nowhere near
-  // it; what is, is a draft holding attachments, which this does not rewrite
-  // anyway. (This used to be the transport's one-argv-string limit. That limit
-  // left with the CLI transport; the reason to bound the work did not.)
-  if (rawB64.length > DRAFT_SIGN_MAX_CHARS) return UNSUPPORTED;
+  // it. (This used to be the transport's one-argv-string limit. That limit
+  // left with the CLI transport; the reason to bound the work did not.) A
+  // draft with files has its own, larger bound below, because only its text
+  // part is worked on.
+  if (rawB64.length > DRAFT_WITH_FILES_MAX_CHARS) return UNSUPPORTED;
+  // Past the text bound, only a draft with files goes on, and the headers
+  // that say so are read from the head alone, before anything big is decoded.
+  if (rawB64.length > DRAFT_SIGN_MAX_CHARS && !headDeclaresFiles(rawB64)) return UNSUPPORTED;
 
   const bytes = Buffer.from(rawB64, "base64url");
   const message = bytes.toString("utf8");
@@ -294,57 +310,121 @@ export function signDraftRaw(rawB64: string, sig: Signature): DraftSignResult {
   // anything; a draft that fails it is sent exactly as it stands.
   if (!Buffer.from(message, "utf8").equals(bytes)) return UNSUPPORTED;
 
+  const out = signEntity(message, sig, 0);
+  if (out.state !== "applied" || out.text === undefined) return { state: out.state };
+  return { raw: encodeRaw(out.text), state: "applied" };
+}
+
+/** Whether a draft's top-level type is multipart/mixed or related, read from
+ * its first 64 KB (a header block is far smaller) without decoding the rest. */
+function headDeclaresFiles(rawB64: string): boolean {
+  const head = Buffer.from(rawB64.slice(0, 64 * 1024), "base64url").toString("utf8");
+  const end = bodyOffset(head);
+  if (end === -1) return false;
+  const type = mimeType(head.slice(0, end));
+  return type === "multipart/mixed" || type === "multipart/related";
+}
+
+interface EntityResult {
+  text?: string;
+  state: DraftSignResult["state"];
+}
+
+const UNSUPPORTED_ENTITY: EntityResult = { state: "skipped_unsupported_draft" };
+
+/** Sign one MIME entity: the whole message at depth 0, the first part of a
+ * mixed or related container below it. Returns the rewritten entity text. */
+function signEntity(message: string, sig: Signature, depth: number): EntityResult {
   const bodyStart = bodyOffset(message);
-  if (bodyStart === -1) return UNSUPPORTED;
+  if (bodyStart === -1) return UNSUPPORTED_ENTITY;
 
   const headerBlock = message.slice(0, bodyStart);
   const contentType = readHeader(headerBlock, "content-type") ?? "text/plain";
   const type = mimeType(headerBlock);
 
+  if (type === "multipart/mixed" || type === "multipart/related") {
+    const boundary = /boundary\s*=\s*"?([^";]+)"?/i.exec(contentType)?.[1];
+    if (!boundary) return UNSUPPORTED_ENTITY;
+    const body = message.slice(bodyStart);
+    const delims = findDelimiters(body, boundary);
+    if (delims.length < 2) return UNSUPPORTED_ENTITY;
+    if (!body.startsWith(`--${boundary}--`, delims[delims.length - 1])) return UNSUPPORTED_ENTITY;
+    const lineEnd = body.indexOf("\n", delims[0]);
+    if (lineEnd === -1) return UNSUPPORTED_ENTITY;
+    const regionStart = lineEnd + 1;
+    let regionEnd = delims[1];
+    if (body[regionEnd - 1] === "\n") regionEnd--;
+    if (body[regionEnd - 1] === "\r") regionEnd--;
+    if (regionEnd < regionStart) return UNSUPPORTED_ENTITY;
+    const first = body.slice(regionStart, regionEnd);
+    const firstType = mimeType(first.slice(0, Math.max(0, bodyOffset(first))));
+    // What a first part may be. This table is also the depth bound: a
+    // related part is allowed only under mixed, and nothing else nests, so
+    // mixed > related > text is as deep as the recursion can go.
+    const allowed =
+      firstType === "text/plain" ||
+      firstType === "multipart/alternative" ||
+      (type === "multipart/mixed" && firstType === "multipart/related");
+    if (!allowed) return UNSUPPORTED_ENTITY;
+    // The text part is bounded as a whole text draft is.
+    if (Buffer.byteLength(first, "utf8") > (DRAFT_SIGN_MAX_CHARS * 3) / 4 && firstType !== "multipart/related") {
+      return UNSUPPORTED_ENTITY;
+    }
+    const signed = signEntity(first, sig, depth + 1);
+    if (signed.state !== "applied" || signed.text === undefined) return signed;
+    return {
+      text: message.slice(0, bodyStart + regionStart) + signed.text + message.slice(bodyStart + regionEnd),
+      state: "applied",
+    };
+  }
+
+  // A part inside a container carries no MIME-Version of its own.
+  const nested = depth > 0;
+
   if (type === "text/plain") {
     const cte = normaliseCte(readHeader(headerBlock, "content-transfer-encoding"));
-    if (!cte) return UNSUPPORTED;
-    if (!charsetIsUtf8Safe(headerBlock)) return UNSUPPORTED;
+    if (!cte) return UNSUPPORTED_ENTITY;
+    if (!charsetIsUtf8Safe(headerBlock)) return UNSUPPORTED_ENTITY;
     const rawBody = message.slice(bodyStart);
     const plain = decodePart(rawBody, cte);
-    if (plain === undefined) return UNSUPPORTED;
+    if (plain === undefined) return UNSUPPORTED_ENTITY;
     if (signaturePresentInHtml(plainToHtml(plain), sig.text)) {
       return { state: "already_present" };
     }
-    return promotePlainDraft(headerBlock, rawBody, plain, sig);
+    return { text: promotePlainDraft(headerBlock, rawBody, plain, sig, nested), state: "applied" };
   }
 
-  if (type !== "multipart/alternative") return UNSUPPORTED;
+  if (type !== "multipart/alternative") return UNSUPPORTED_ENTITY;
 
   const boundary = /boundary\s*=\s*"?([^";]+)"?/i.exec(contentType)?.[1];
-  if (!boundary) return UNSUPPORTED;
+  if (!boundary) return UNSUPPORTED_ENTITY;
 
   const body = message.slice(bodyStart);
   const delims = findDelimiters(body, boundary);
-  if (delims.length < 2) return UNSUPPORTED;
-  if (!body.startsWith(`--${boundary}--`, delims[delims.length - 1])) return UNSUPPORTED;
+  if (delims.length < 2) return UNSUPPORTED_ENTITY;
+  if (!body.startsWith(`--${boundary}--`, delims[delims.length - 1])) return UNSUPPORTED_ENTITY;
 
   const parts: Part[] = [];
   for (let k = 0; k < delims.length - 1; k++) {
     const lineEnd = body.indexOf("\n", delims[k]);
-    if (lineEnd === -1) return UNSUPPORTED;
+    if (lineEnd === -1) return UNSUPPORTED_ENTITY;
     const regionStart = lineEnd + 1;
     let regionEnd = delims[k + 1];
     if (body[regionEnd - 1] === "\n") regionEnd--;
     if (body[regionEnd - 1] === "\r") regionEnd--;
-    if (regionEnd < regionStart) return UNSUPPORTED;
+    if (regionEnd < regionStart) return UNSUPPORTED_ENTITY;
 
     const region = body.slice(regionStart, regionEnd);
     const partBodyStart = bodyOffset(region);
-    if (partBodyStart === -1) return UNSUPPORTED;
+    if (partBodyStart === -1) return UNSUPPORTED_ENTITY;
     const partHeaders = region.slice(0, partBodyStart);
 
     const kind = textPartKind(mimeType(partHeaders));
-    if (!kind) return UNSUPPORTED;
+    if (!kind) return UNSUPPORTED_ENTITY;
     const cte = normaliseCte(readHeader(partHeaders, "content-transfer-encoding"));
-    if (!cte) return UNSUPPORTED;
+    if (!cte) return UNSUPPORTED_ENTITY;
 
-    if (!charsetIsUtf8Safe(partHeaders)) return UNSUPPORTED;
+    if (!charsetIsUtf8Safe(partHeaders)) return UNSUPPORTED_ENTITY;
     parts.push({
       kind,
       headerStart: bodyStart + regionStart,
@@ -354,12 +434,12 @@ export function signDraftRaw(rawB64: string, sig: Signature): DraftSignResult {
       headers: partHeaders.replace(/\r?\n$/, ""),
     });
   }
-  if (parts.length === 0) return UNSUPPORTED;
+  if (parts.length === 0) return UNSUPPORTED_ENTITY;
 
   const htmlPart = parts.find((p) => p.kind === "html");
   if (htmlPart) {
     const html = decodePart(message.slice(htmlPart.start, htmlPart.end), htmlPart.cte);
-    if (html === undefined) return UNSUPPORTED;
+    if (html === undefined) return UNSUPPORTED_ENTITY;
     if (signaturePresentInHtml(html, sig.text)) return { state: "already_present" };
     const signed = signHtmlBody(html, sig);
 
@@ -368,7 +448,7 @@ export function signDraftRaw(rawB64: string, sig: Signature): DraftSignResult {
         message.slice(0, htmlPart.start) +
         encodeCte(signed, htmlPart.cte) +
         message.slice(htmlPart.end);
-      return { raw: encodeRaw(out), state: "applied" };
+      return { text: out, state: "applied" };
     }
     // The signature does not fit what this part declares (an accent or an
     // emoji in a 7bit part, or a line past the limit). Re-encode the part as
@@ -377,14 +457,14 @@ export function signDraftRaw(rawB64: string, sig: Signature): DraftSignResult {
       `${setHeader(htmlPart.headers, "Content-Transfer-Encoding", "base64")}\r\n\r\n` +
       encodeCte(signed, "base64");
     const out = message.slice(0, htmlPart.headerStart) + rewritten + message.slice(htmlPart.end);
-    return { raw: encodeRaw(out), state: "applied" };
+    return { text: out, state: "applied" };
   }
 
   // multipart/alternative with no HTML part: add one, derived from the plain
   // part exactly as a plain-only draft is promoted.
   const plainPart = parts[0];
   const plain = decodePart(message.slice(plainPart.start, plainPart.end), plainPart.cte);
-  if (plain === undefined) return UNSUPPORTED;
+  if (plain === undefined) return UNSUPPORTED_ENTITY;
   // Escaped once: the presence check and the signing below want the same
   // string, and plainToHtml is five full-body regex passes.
   const plainAsHtml = plainToHtml(plain);
@@ -400,7 +480,7 @@ export function signDraftRaw(rawB64: string, sig: Signature): DraftSignResult {
     "",
   ].join("\r\n");
   return {
-    raw: encodeRaw(message.slice(0, closing) + added + message.slice(closing)),
+    text: message.slice(0, closing) + added + message.slice(closing),
     state: "applied",
   };
 }

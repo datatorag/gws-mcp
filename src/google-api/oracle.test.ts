@@ -89,14 +89,16 @@ const ALL = Object.entries(METHOD_TABLE).flatMap(([service, svc]) =>
 );
 
 function toolTuples(): string[] {
-  const dir = path.join(root, "src", "tools");
+  // Every directory whose code calls the client: the tools, and the
+  // attachment resolver and byte sources they use (SCRUM-279).
+  const dirs = ["tools", "attachments"].map((d) => path.join(root, "src", d));
   const found = new Set<string>();
   let callSites = 0;
   let literalSites = 0;
-  for (const file of readdirSync(dir)) {
+  for (const [dir, file] of dirs.flatMap((d) => readdirSync(d).map((f) => [d, f] as const))) {
     if (!file.endsWith(".ts") || file.endsWith(".test.ts") || file.includes("test-helper")) continue;
     const source = readFileSync(path.join(dir, file), "utf8");
-    callSites += (source.match(/\.api\(/g) ?? []).length;
+    callSites += (source.match(/\.(?:api|upload|download)\(/g) ?? []).length;
     // upload and download are the media primitives on the same client; a
     // tool that calls one names a tuple exactly as api() does.
     for (const m of source.matchAll(/\.(?:api|upload|download)\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*,\s*"([^"]+)"/g)) {

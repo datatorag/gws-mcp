@@ -3,17 +3,31 @@ import { randomUUID } from "node:crypto";
 import type { GwsClient } from "../gws-client.js";
 import { deleteResponse, jsonResponse, stripHtml, truncate } from "./response.js";
 import {
+  appendToHtml,
   applySignature,
   plainToHtml,
   lookupSignature,
   suppressionRequested,
   type SignatureState,
 } from "./gmail-signature.js";
-import { draftFromHeader, signDraftRaw } from "./gmail-draft-send.js";
-import { encodeAddressHeader, encodeHeaderValue } from "./mime-headers.js";
+import { DRAFT_SIGN_MAX_CHARS, draftFromHeader, signDraftRaw } from "./gmail-draft-send.js";
+import { encodeAddressHeader, encodeHeaderValue, renderHeaders } from "./mime-headers.js";
+export { renderHeaders };
+import { buildMessage } from "../mime/build.js";
+import {
+  parseAttachments,
+  placeFiles,
+  resolveAttachments,
+  type OriginalPart,
+  type ParsedEntry,
+  type PlannedFile,
+  type ReportEntry,
+  type Resolved,
+} from "../attachments/resolve.js";
 import {
   addressOnly,
   derivePlain,
+  escapeHtml,
   buildReplyBodies,
   originalPlainText,
   originalHtmlBody,
@@ -49,6 +63,45 @@ const emailFields = {
   bcc: {
     type: "string",
     description: "BCC recipients, comma-separated",
+  },
+};
+
+/** SCRUM-279. Every tool that writes a message can carry files. */
+const attachmentsField = {
+  attachments: {
+    type: "array",
+    maxItems: 10,
+    description:
+      "Files to send with the message, at most 10, 25 MB in total. Each entry is one of: a Drive file id as a string; " +
+      '{"file_id": "<id>", "as": "pdf" | "docx"} to send a Google Doc, Sheet or Slides deck as a file (docx for Docs only); ' +
+      'or {"filename": "chart.png", "mime_type": "image/png", "data": "<base64>"} for bytes you already hold, such as an image the user pasted, at most 2 MB each and 5 MB per call. ' +
+      "Google Docs, Sheets and Slides passed by id alone are sent as links in the message, the way Gmail does, not as files. " +
+      "Other Drive files are attached as they are. " +
+      'To show an image in the body rather than at the bottom, reference it in html_body as <img src="cid:FILENAME">, where FILENAME is its filename with any character other than letters, digits, dot, dash and underscore replaced by an underscore. ' +
+      "Sharing a Drive link is the sender's responsibility; nothing here changes who can open a file. " +
+      "The response's attachments field reports each file as attached, inline, linked or exported.",
+    items: {
+      anyOf: [
+        { type: "string", description: "A Drive file id." },
+        {
+          type: "object",
+          properties: {
+            file_id: { type: "string", description: "A Drive file id." },
+            as: { type: "string", enum: ["pdf", "docx"], description: "Export a Google Doc, Sheet or Slides deck in this format." },
+          },
+          required: ["file_id"],
+        },
+        {
+          type: "object",
+          properties: {
+            filename: { type: "string" },
+            mime_type: { type: "string" },
+            data: { type: "string", description: "The file's bytes, base64-encoded." },
+          },
+          required: ["filename", "mime_type", "data"],
+        },
+      ],
+    },
   },
 };
 
@@ -99,7 +152,7 @@ export const gmailTools: ToolDef[] = [
       SIGNATURE_NOTE,
     inputSchema: {
       type: "object",
-      properties: { ...emailFields, ...signatureField },
+      properties: { ...emailFields, ...attachmentsField, ...signatureField },
       required: ["to", "subject"],
     },
     annotations: MUTATE("Send email"),
@@ -120,6 +173,7 @@ export const gmailTools: ToolDef[] = [
           description:
             "HTML reply body. Sent as text/html with no plain-text alternative part (this path hands quoting and threading to a single-part composer); the original message is quoted with Gmail styling. Provide body or html_body, not both.",
         },
+        ...attachmentsField,
         ...signatureField,
       },
       required: ["message_id"],
@@ -150,6 +204,12 @@ export const gmailTools: ToolDef[] = [
           type: "string",
           description:
             "Optional HTML note included above the forwarded message. Sent as text/html with no plain-text alternative part; the forwarded block is formatted with Gmail styling. Provide body or html_body, not both.",
+        },
+        ...attachmentsField,
+        include_original_attachments: {
+          type: "boolean",
+          description:
+            "The original message's own attachments are forwarded with it, counted in the 25 MB limit. Set false to forward the text alone. Defaults to true.",
         },
         ...signatureField,
       },
@@ -232,7 +292,7 @@ export const gmailTools: ToolDef[] = [
       DRAFT_SIGNATURE_NOTE,
     inputSchema: {
       type: "object",
-      properties: { ...emailFields, ...draftSignatureField },
+      properties: { ...emailFields, ...attachmentsField, ...draftSignatureField },
       required: ["to", "subject"],
     },
     annotations: CREATE("Create email draft"),
@@ -240,7 +300,7 @@ export const gmailTools: ToolDef[] = [
   {
     name: "gmail_update_draft",
     description:
-      "Update an existing draft email in Gmail. This fully replaces the draft's message content (Gmail API does not support partial edits). If thread_id is omitted, the tool preserves the existing thread automatically." +
+      "Update an existing draft email in Gmail. This fully replaces the draft's message content (Gmail API does not support partial edits), attachments included: files the draft held are dropped unless they are passed again in attachments. If thread_id is omitted, the tool preserves the existing thread automatically." +
       DRAFT_SIGNATURE_NOTE,
     inputSchema: {
       type: "object",
@@ -255,6 +315,7 @@ export const gmailTools: ToolDef[] = [
           description:
             "Thread ID to preserve threading. If omitted, the existing draft's thread is preserved automatically.",
         },
+        ...attachmentsField,
         ...draftSignatureField,
       },
       required: ["draft_id", "to", "subject"],
@@ -266,7 +327,7 @@ export const gmailTools: ToolDef[] = [
     description:
       "Send an existing Gmail draft by its draft ID. Use this to send a draft that was previously created with gmail_create_draft and reviewed — it sends the draft as stored and removes it from the Drafts folder (no orphaned draft). Returns the sent message metadata." +
       SEND_DRAFT_SIGNATURE_NOTE +
-      " A draft holding an attachment, an inline image or any shape other than plain text or plain-plus-HTML is sent untouched and reports skipped_unsupported_draft.",
+      " A draft holding files is signed in its text part and its files are sent as they are. A draft in any other shape is sent untouched and reports skipped_unsupported_draft.",
     inputSchema: {
       type: "object",
       properties: {
@@ -500,6 +561,7 @@ export const gmailTools: ToolDef[] = [
 interface GmailPart {
   mimeType?: string;
   filename?: string;
+  headers?: { name: string; value: string }[];
   body?: { data?: string; attachmentId?: string; size?: number };
   parts?: GmailPart[];
 }
@@ -668,36 +730,6 @@ function assertHeadersSingleLine(args: Record<string, unknown>): void {
   }
 }
 
-/** `bodies` is passed in rather than read off `args` so the signature can be
- * applied to the RESOLVED body before any path branches (SCRUM-278). */
-/** The ONE place a header array becomes wire bytes.
- *
- * Folds any line break as it joins, so "no header line contains CR or LF" is a
- * property of the assembly rather than of every producer remembering to check.
- * The producers still reject a line break in the CALLER's own arguments
- * (`assertHeadersSingleLine`) — that is an argument-contract error worth a
- * clear message. This is the other half: attacker-supplied values copied out of
- * an inbound message get folded here, so a header derived somewhere new cannot
- * become an injection by being forgotten. */
-export function renderHeaders(lines: string[]): string {
-  return lines.map(foldUnlessContinuation).join("\r\n");
-}
-
-/** Fold every line break EXCEPT a legal RFC 2047/5322 continuation.
- *
- * `CRLF + SP|TAB` inside a header value is correct and wanted — it is how
- * `encodeHeaderValue` wraps a long encoded subject, and it is the one place a
- * CRLF in a header is not an injection. A blanket fold flattens those too,
- * which silently unfolds long non-ASCII subjects past the line-length limit.
- * The split captures the legal folds so only the gaps between them are
- * folded. */
-function foldUnlessContinuation(line: string): string {
-  return line
-    .split(/(\r\n[ \t])/)
-    .map((piece, i) => (i % 2 === 1 ? piece : piece.replace(/[\r\n]+/g, " ")))
-    .join("");
-}
-
 /** multipart/alternative, plain part FIRST: clients prefer the last part they
  * can render, so text/html must come after the fallback.
  *
@@ -731,12 +763,8 @@ function renderMultipartAlternative(
   );
 }
 
-function buildRawMessage(
-  toolName: string,
-  args: Record<string, unknown>,
-  bodies: { body?: string; html?: string; unsignedHtml?: string }
-): string {
-  const { body, html } = bodies;
+/** The message's own headers for gmail_send and the draft tools. */
+function composeHeaders(args: Record<string, unknown>): string[] {
   assertHeadersSingleLine(args);
   const headers = [
     `To: ${encodeAddressHeader(args.to as string)}`,
@@ -744,33 +772,138 @@ function buildRawMessage(
   ];
   if (args.cc) headers.push(`Cc: ${encodeAddressHeader(args.cc as string)}`);
   if (args.bcc) headers.push(`Bcc: ${encodeAddressHeader(args.bcc as string)}`);
+  return headers;
+}
 
-  if (html !== undefined) {
-    // The plain fallback is the caller's text when given, otherwise text
-    // derived from the markup BEFORE the signature went in, so the plain part
-    // never carries it. Derived HERE and nowhere earlier, because this is the
-    // only place a plain part is actually built.
-    return renderMultipartAlternative(
-      headers,
-      body ?? derivePlain(bodies.unsignedHtml ?? html),
-      html
-    );
+/** The plain part, and the HTML part when there is one.
+ *
+ * The plain fallback is the caller's text when given, otherwise text derived
+ * from the markup BEFORE the signature went in, so the plain part never
+ * carries it. Derived HERE and nowhere earlier, because this is the only place
+ * a plain part is actually built. */
+function composeBodies(bodies: { body?: string; html?: string; unsignedHtml?: string }): {
+  plain: string;
+  html?: string;
+} {
+  if (bodies.html === undefined) return { plain: bodies.body as string };
+  return { plain: bodies.body ?? derivePlain(bodies.unsignedHtml ?? bodies.html), html: bodies.html };
+}
+
+function renderPlainMessage(headers: string[], plain: string): string {
+  return Buffer.from(
+    `${renderHeaders([...headers, "MIME-Version: 1.0", "Content-Type: text/plain; charset=utf-8"])}\r\n\r\n${plain}`
+  ).toString("base64url");
+}
+
+function renderRaw(headers: string[], composed: { plain: string; html?: string }): string {
+  return composed.html !== undefined
+    ? renderMultipartAlternative(headers, composed.plain, composed.html)
+    : renderPlainMessage(headers, composed.plain);
+}
+
+/** `bodies` is passed in rather than read off `args` so the signature can be
+ * applied to the RESOLVED body before any path branches (SCRUM-278). */
+function buildRawMessage(
+  toolName: string,
+  args: Record<string, unknown>,
+  bodies: { body?: string; html?: string; unsignedHtml?: string }
+): string {
+  return renderRaw(composeHeaders(args), composeBodies(bodies));
+}
+
+/** Google Docs, Sheets and Slides go in the note as links, the way Gmail
+ * sends them: one line per file, in the plain part and the HTML part both,
+ * placed before signing so the order is note, links, signature, quote.
+ * With no links the bodies come back as they were given. */
+function withLinks(
+  bodies: { body?: string; html?: string },
+  links: Resolved["links"]
+): { body?: string; html?: string } {
+  if (links.length === 0) return bodies;
+  const plainBlock = links.map((l) => `${l.name}: ${l.link}`).join("\n");
+  const htmlBlock =
+    '<div class="gws_drive_links">' +
+    links.map((l) => `<div><a href="${escapeHtml(l.link)}">${escapeHtml(l.name)}</a></div>`).join("") +
+    "</div>";
+  const plain = bodies.body ?? (bodies.html !== undefined ? derivePlain(bodies.html) : "");
+  const html = bodies.html ?? plainToHtml(plain);
+  return {
+    body: plain === "" ? plainBlock : `${plain}\n\n${plainBlock}`,
+    html: appendToHtml(html, `${html === "" ? "" : "<br>"}${htmlBlock}`),
+  };
+}
+
+type Delivery =
+  | { kind: "send"; threadId?: string }
+  | { kind: "draft_create" }
+  | { kind: "draft_update"; draftId: string; threadId?: string };
+
+/** Hand a composed message with attachments to Gmail.
+ *
+ * Files go as one streamed message/rfc822 upload built as it is sent, so no
+ * attachment is ever held whole. A message whose attachments all turned out
+ * to be links has no bytes to stream and goes as raw MIME exactly as an
+ * unattached one does. */
+async function deliver(
+  client: GwsClient,
+  delivery: Delivery,
+  headers: string[],
+  composed: { plain: string; html?: string },
+  files: PlannedFile[]
+): Promise<unknown> {
+  const params: Record<string, unknown> = { userId: "me" };
+  if (delivery.kind === "draft_update") params.id = delivery.draftId;
+  const threadId = delivery.kind === "draft_create" ? undefined : delivery.threadId;
+  // Each call names its method literally: the oracle test reads these call
+  // sites to know which methods the tools use.
+  if (files.length === 0) {
+    const message = { raw: renderRaw(headers, composed), ...(threadId ? { threadId } : {}) };
+    const result =
+      delivery.kind === "send"
+        ? await client.api("gmail", "users.messages", "send", { params, jsonBody: message })
+        : delivery.kind === "draft_create"
+          ? await client.api("gmail", "users.drafts", "create", { params, jsonBody: { message } })
+          : await client.api("gmail", "users.drafts", "update", { params, jsonBody: { message } });
+    return result.data;
   }
-  headers.push("MIME-Version: 1.0", "Content-Type: text/plain; charset=utf-8");
-  return Buffer.from(`${renderHeaders(headers)}\r\n\r\n${body as string}`).toString(
-    "base64url"
-  );
+
+  const thread = threadId ? { threadId } : {};
+  const upload = {
+    params,
+    metadata: delivery.kind === "send" ? thread : threadId ? { message: thread } : {},
+    contentType: "message/rfc822",
+    source: buildMessage(headers, composed, placeFiles(files, composed.html)),
+  };
+  const result =
+    delivery.kind === "send"
+      ? await client.upload("gmail", "users.messages", "send", upload)
+      : delivery.kind === "draft_create"
+        ? await client.upload("gmail", "users.drafts", "create", upload)
+        : await client.upload("gmail", "users.drafts", "update", upload);
+  return result.data;
+}
+
+/** Every response that carried attachments says what became of each. A call
+ * with none carries no `attachments` key at all, so its response is as it
+ * always was. */
+function withReport<T extends Record<string, unknown>>(body: T, report?: ReportEntry[]): T {
+  return report && report.length > 0 ? { ...body, attachments: report } : body;
 }
 
 /** The draft tools report the signature outcome the way the send tools do. */
-function draftResponse(data: unknown, signature: SignatureState) {
+function draftResponse(data: unknown, signature: SignatureState, report?: ReportEntry[]) {
   const draft = data as { id?: string; message?: { id?: string; threadId?: string } };
   const messageId = draft?.message?.id || "";
-  return jsonResponse({
-    ...draft,
-    gmail_url: `https://mail.google.com/mail/u/0/#drafts?compose=${messageId}`,
-    signature,
-  });
+  return jsonResponse(
+    withReport(
+      {
+        ...draft,
+        gmail_url: `https://mail.google.com/mail/u/0/#drafts?compose=${messageId}`,
+        signature,
+      },
+      report
+    )
+  );
 }
 
 async function fetchMessageList(
@@ -896,9 +1029,9 @@ async function modifyMessageLabels(
 
 /** Every send tool's response carries the signature outcome, so a caller can
  * tell an applied signature from a missing one from a failed lookup. */
-function sentResponse(data: unknown, signature: SignatureState) {
+function sentResponse(data: unknown, signature: SignatureState, report?: ReportEntry[]) {
   const base = data && typeof data === "object" ? (data as Record<string, unknown>) : {};
-  return jsonResponse({ ...base, signature });
+  return jsonResponse(withReport({ ...base, signature }, report));
 }
 
 /** Sign the body for the CLI helpers that have ONE body slot (+reply,
@@ -916,7 +1049,8 @@ async function signSingleSlotBody(
   client: GwsClient,
   toolName: string,
   args: Record<string, unknown>,
-  opts?: { requireBody?: boolean }
+  opts?: { requireBody?: boolean },
+  links: Resolved["links"] = []
 ): Promise<{
   body?: string;
   html?: string;
@@ -930,7 +1064,7 @@ async function signSingleSlotBody(
   const signed = await applySignature(
     client,
     args,
-    html !== undefined ? { html } : { body: body ?? "" }
+    withLinks(html !== undefined ? { html } : { body: body ?? "" }, links)
   );
   return {
     body: signed.body,
@@ -996,10 +1130,24 @@ async function sendDraft(client: GwsClient, args: Record<string, unknown>) {
   if (message.threadId) updateBody.threadId = message.threadId;
 
   try {
-    await client.api("gmail", "users.drafts", "update", {
-      params: { userId: "me", id: draftId },
-      jsonBody: { message: updateBody },
-    });
+    if (rewritten.raw.length > DRAFT_SIGN_MAX_CHARS) {
+      // A draft carrying files (SCRUM-279) goes back as media, not as a JSON
+      // string the size of every file it holds.
+      const bytes = Buffer.from(rewritten.raw, "base64url");
+      await client.upload("gmail", "users.drafts", "update", {
+        params: { userId: "me", id: draftId },
+        metadata: message.threadId ? { message: { threadId: message.threadId } } : {},
+        contentType: "message/rfc822",
+        source: (async function* () {
+          yield bytes;
+        })(),
+      });
+    } else {
+      await client.api("gmail", "users.drafts", "update", {
+        params: { userId: "me", id: draftId },
+        jsonBody: { message: updateBody },
+      });
+    }
   } catch {
     // Gmail refused our rewrite. The draft is untouched on the server, so
     // send what the user actually wrote rather than failing their send.
@@ -1015,10 +1163,29 @@ async function sendDraft(client: GwsClient, args: Record<string, unknown>) {
  * text/html part and never both, which is why a signed reply used to lose its
  * plain alternative. Composing here is what makes multipart/alternative
  * possible on every send path. */
+/** Every part of a message that carries a filename: what a forward carries
+ * along (SCRUM-279). Parts without one are the message's own text. */
+function filenameParts(messageId: string, part: GmailPart | undefined, out: OriginalPart[] = []): OriginalPart[] {
+  if (!part) return out;
+  if (part.filename && (part.body?.attachmentId || part.body?.data)) {
+    out.push({
+      messageId,
+      filename: part.filename,
+      mimeType: part.mimeType,
+      size: part.body?.size,
+      attachmentId: part.body?.attachmentId,
+      data: part.body?.attachmentId ? undefined : part.body?.data,
+      contentId: part.headers?.find((h) => h.name.toLowerCase() === "content-id")?.value,
+    });
+  }
+  for (const p of part.parts ?? []) filenameParts(messageId, p, out);
+  return out;
+}
+
 async function fetchOriginal(
   client: GwsClient,
   messageId: string
-): Promise<{ original: OriginalMessage; threadId?: string }> {
+): Promise<{ original: OriginalMessage; threadId?: string; parts: OriginalPart[] }> {
   const result = await client.api("gmail", "users.messages", "get", {
     params: { userId: "me", id: messageId, format: "full" },
   });
@@ -1032,6 +1199,7 @@ async function fetchOriginal(
   };
   return {
     threadId: message.threadId,
+    parts: filenameParts(messageId, message.payload),
     original: {
       from: header("From"),
       date: header("Date"),
@@ -1044,6 +1212,27 @@ async function fetchOriginal(
   };
 }
 
+/** gmail_send and gmail_create_draft with attachments. Drive metadata is
+ * read before signing, because links go into the note above the signature;
+ * every refusal (shape, size, a missing or folder id) lands before the
+ * signature lookup and before any byte is fetched. */
+async function sendWithAttachments(
+  client: GwsClient,
+  toolName: string,
+  args: Record<string, unknown>,
+  entries: ParsedEntry[]
+) {
+  const bodies = resolveBody(toolName, args);
+  const headers = composeHeaders(args);
+  const resolved = await resolveAttachments(client, entries);
+  const signed = await applySignature(client, args, withLinks(bodies, resolved.links));
+  const delivery: Delivery = toolName === "gmail_send" ? { kind: "send" } : { kind: "draft_create" };
+  const data = await deliver(client, delivery, headers, composeBodies(signed), resolved.files);
+  return toolName === "gmail_send"
+    ? sentResponse(data, signed.state, resolved.report)
+    : draftResponse(data, signed.state, resolved.report);
+}
+
 export async function handleGmail(
   client: GwsClient,
   toolName: string,
@@ -1052,6 +1241,8 @@ export async function handleGmail(
   switch (toolName) {
     case "gmail_send": {
       assertHeadersSingleLine(args);
+      const entries = parseAttachments(args.attachments);
+      if (entries.length > 0) return sendWithAttachments(client, toolName, args, entries);
       // The signature is applied to the RESOLVED body, before anything builds
       // MIME, so no send path can be reached without it having been offered.
       const signed = await applySignature(client, args, resolveBody(toolName, args));
@@ -1073,17 +1264,31 @@ export async function handleGmail(
       // returns a value containing CRLF verbatim.
       assertHeadersSingleLine(args);
       assertBodyContract(toolName, args, { requireBody: true });
-      // Independent: the signature lookup reads the account's sendAs, the
-      // fetch reads the message being replied to, and neither needs the
-      // other's result. Issued together, they cost one round trip instead of
-      // two. Both contract asserts ran above, so a bad call still costs none.
-      const [signed, fetched] = await Promise.all([
-        signSingleSlotBody(client, toolName, args, { requireBody: true }),
-        fetchOriginal(client, args.message_id as string),
-      ]);
+      const entries = parseAttachments(args.attachments);
+      let signed: Awaited<ReturnType<typeof signSingleSlotBody>>;
+      let fetched: Awaited<ReturnType<typeof fetchOriginal>>;
+      let resolved: Resolved | undefined;
+      if (entries.length === 0) {
+        // Independent: the signature lookup reads the account's sendAs, the
+        // fetch reads the message being replied to, and neither needs the
+        // other's result. Issued together, they cost one round trip instead of
+        // two. Both contract asserts ran above, so a bad call still costs none.
+        [signed, fetched] = await Promise.all([
+          signSingleSlotBody(client, toolName, args, { requireBody: true }),
+          fetchOriginal(client, args.message_id as string),
+        ]);
+      } else {
+        // Links go into the note before the signature, so the Drive metadata
+        // is read (alongside the original) before signing.
+        [resolved, fetched] = await Promise.all([
+          resolveAttachments(client, entries),
+          fetchOriginal(client, args.message_id as string),
+        ]);
+        signed = await signSingleSlotBody(client, toolName, args, { requireBody: true }, resolved.links);
+      }
       const { original, threadId } = fetched;
       const plainBody =
-        (args.body as string | undefined) ??
+        signed.body ??
         derivePlain(signed.unsignedHtml ?? (args.html_body as string) ?? "");
       const bodies = buildReplyBodies(
         original,
@@ -1095,6 +1300,10 @@ export async function handleGmail(
         `Subject: ${encodeHeaderValue(replySubject(original.subject))}`,
         ...threadHeaders(original),
       ];
+      if (resolved) {
+        const data = await deliver(client, { kind: "send", threadId }, headers, { plain: bodies.plain, html: bodies.html }, resolved.files);
+        return sentResponse(data, signed.state, resolved.report);
+      }
       const result = await client.api("gmail", "users.messages", "send", {
         params: { userId: "me" },
         jsonBody: {
@@ -1108,13 +1317,32 @@ export async function handleGmail(
     case "gmail_forward": {
       assertHeadersSingleLine(args);
       assertBodyContract(toolName, args);
-      const [signed, fetched] = await Promise.all([
-        signSingleSlotBody(client, toolName, args),
-        fetchOriginal(client, args.message_id as string),
-      ]);
+      const entries = parseAttachments(args.attachments);
+      const carry = !suppressionRequested(args.include_original_attachments);
+      let signed: Awaited<ReturnType<typeof signSingleSlotBody>>;
+      let fetched: Awaited<ReturnType<typeof fetchOriginal>>;
+      let resolved: Resolved | undefined;
+      if (entries.length === 0) {
+        [signed, fetched] = await Promise.all([
+          signSingleSlotBody(client, toolName, args),
+          fetchOriginal(client, args.message_id as string),
+        ]);
+        // The original's own files come along unless the caller opted out.
+        // No Drive entries means no links, so signing first changes nothing.
+        if (carry && fetched.parts.length > 0) resolved = await resolveAttachments(client, [], fetched.parts);
+      } else {
+        const fetching = fetchOriginal(client, args.message_id as string);
+        resolved = await resolveAttachments(
+          client,
+          entries,
+          fetching.then((f) => (carry ? f.parts : []))
+        );
+        fetched = await fetching;
+        signed = await signSingleSlotBody(client, toolName, args, undefined, resolved.links);
+      }
       const { original } = fetched;
       const to = args.to as string;
-      const note = (args.body as string | undefined) ?? "";
+      const note = signed.body ?? "";
       const noteHtml = signed.html ?? plainToHtml(note);
       const originalPlain = originalPlainText(original);
       const originalHtml = originalHtmlBody(original);
@@ -1123,15 +1351,15 @@ export async function handleGmail(
         `Subject: ${encodeHeaderValue(forwardSubject(original.subject))}`,
         ...threadHeaders(original),
       ];
+      const plain = [note, "", forwardPlainBlock(original, to, originalPlain)].join("\n");
+      const html = `${noteHtml}<br>\n${forwardHtmlBlock(original, to, originalHtml)}`;
+      if (resolved) {
+        const data = await deliver(client, { kind: "send" }, headers, { plain, html }, resolved.files);
+        return sentResponse(data, signed.state, resolved.report);
+      }
       const result = await client.api("gmail", "users.messages", "send", {
         params: { userId: "me" },
-        jsonBody: {
-          raw: renderMultipartAlternative(
-            headers,
-            [note, "", forwardPlainBlock(original, to, originalPlain)].join("\n"),
-            `${noteHtml}<br>\n${forwardHtmlBlock(original, to, originalHtml)}`
-          ),
-        },
+        jsonBody: { raw: renderMultipartAlternative(headers, plain, html) },
       });
       return sentResponse(result.data, signed.state);
     }
@@ -1190,6 +1418,8 @@ export async function handleGmail(
       // Same order as gmail_send: refuse a bad header before the lookup costs
       // a call, sign the RESOLVED body, then build MIME from what came back.
       assertHeadersSingleLine(args);
+      const entries = parseAttachments(args.attachments);
+      if (entries.length > 0) return sendWithAttachments(client, toolName, args, entries);
       const signed = await applySignature(client, args, resolveBody(toolName, args));
       const result = await client.api("gmail", "users.drafts", "create", {
         params: { userId: "me" },
@@ -1200,19 +1430,31 @@ export async function handleGmail(
 
     case "gmail_update_draft": {
       assertHeadersSingleLine(args);
+      const entries = parseAttachments(args.attachments);
       const bodies = resolveBody(toolName, args);
-      // Independent: the signature lookup reads the account's sendAs, the get
-      // reads the draft's thread, and neither needs the other's result.
-      const [signed, existingThreadId] = await Promise.all([
-        applySignature(client, args, bodies),
+      const threadOf = () =>
         args.thread_id
           ? Promise.resolve(args.thread_id as string)
           : client
               .api("gmail", "users.drafts", "get", {
                 params: { userId: "me", id: args.draft_id, format: "metadata" },
               })
-              .then((existing) => (existing.data as { message?: { threadId?: string } })?.message?.threadId),
-      ]);
+              .then((existing) => (existing.data as { message?: { threadId?: string } })?.message?.threadId);
+      if (entries.length > 0) {
+        const [resolved, threadId] = await Promise.all([resolveAttachments(client, entries), threadOf()]);
+        const signed = await applySignature(client, args, withLinks(bodies, resolved.links));
+        const data = await deliver(
+          client,
+          { kind: "draft_update", draftId: args.draft_id as string, threadId },
+          composeHeaders(args),
+          composeBodies(signed),
+          resolved.files
+        );
+        return draftResponse(data, signed.state, resolved.report);
+      }
+      // Independent: the signature lookup reads the account's sendAs, the get
+      // reads the draft's thread, and neither needs the other's result.
+      const [signed, existingThreadId] = await Promise.all([applySignature(client, args, bodies), threadOf()]);
 
       const message: Record<string, unknown> = { raw: buildRawMessage(toolName, args, signed) };
       if (existingThreadId) message.threadId = existingThreadId;

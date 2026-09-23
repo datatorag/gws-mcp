@@ -15,7 +15,9 @@
     "@modelcontextprotocol/sdk": "^1.29.0"
   },
   "devDependencies": {
+    "@types/mailparser": "^3.4.6",
     "@types/node": "^22.19.15",
+    "mailparser": "3.7.4",
     "typescript": "^7.0.2",
     "undici": "6.21.2",
     "vitest": "^4.1.10"

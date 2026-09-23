@@ -12,7 +12,7 @@ import type { GwsClient } from "../gws-client.js";
  * `method`, helper entries carry `command`), `plan` decides each call's
  * fate in order. */
 export function fakeClient(
-  plan: Array<{ data?: unknown; throws?: string; text?: string; status?: number }>
+  plan: Array<{ data?: unknown; throws?: string; text?: string; bytes?: Uint8Array; status?: number }>
 ): { client: GwsClient; calls: Array<Record<string, unknown>> } {
   const calls: Array<Record<string, unknown>> = [];
   const step = () => {
@@ -45,7 +45,10 @@ export function fakeClient(
   });
   // upload entries carry `upload` (the source is drained so a test can read
   // the bytes a handler sent); download entries carry `download`, and the
-  // plan step's `text` is what the stream yields.
+  // plan step's `bytes` (or `text`) is what the stream yields. The download
+  // step is taken when the stream is opened, which for an attachment is when
+  // the upload drains the message, so plan it after the steps that precede
+  // the upload.
   const upload = vi.fn(async (service, resource, method, opts) => {
     const held: Buffer[] = [];
     for await (const chunk of opts.source as AsyncIterable<Uint8Array>) held.push(Buffer.from(chunk));
@@ -56,8 +59,8 @@ export function fakeClient(
   const download = vi.fn(async (service, resource, method, params) => {
     calls.push({ download: true, service, resource, method, params });
     const s = step();
-    const body = new TextEncoder().encode(s.text ?? "");
-    return { stream: new Response(body).body!, size: body.length };
+    const body = s.bytes ?? new TextEncoder().encode(s.text ?? "");
+    return { stream: new Response(body as Uint8Array<ArrayBuffer>).body!, size: body.length };
   });
   return {
     client: { api, helper, fetchText, gmailAttachmentToDrive, upload, download } as unknown as GwsClient,

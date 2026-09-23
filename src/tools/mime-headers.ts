@@ -112,3 +112,31 @@ export function encodeAddressHeader(list: string): string {
     })
     .join(", ");
 }
+
+/** The ONE place a header array becomes wire bytes.
+ *
+ * Folds any line break as it joins, so "no header line contains CR or LF" is a
+ * property of the assembly rather than of every producer remembering to check.
+ * The producers still reject a line break in the CALLER's own arguments
+ * (`assertHeadersSingleLine`) — that is an argument-contract error worth a
+ * clear message. This is the other half: attacker-supplied values copied out of
+ * an inbound message get folded here, so a header derived somewhere new cannot
+ * become an injection by being forgotten. */
+export function renderHeaders(lines: string[]): string {
+  return lines.map(foldUnlessContinuation).join("\r\n");
+}
+
+/** Fold every line break EXCEPT a legal RFC 2047/5322 continuation.
+ *
+ * `CRLF + SP|TAB` inside a header value is correct and wanted — it is how
+ * `encodeHeaderValue` wraps a long encoded subject, and it is the one place a
+ * CRLF in a header is not an injection. A blanket fold flattens those too,
+ * which silently unfolds long non-ASCII subjects past the line-length limit.
+ * The split captures the legal folds so only the gaps between them are
+ * folded. */
+function foldUnlessContinuation(line: string): string {
+  return line
+    .split(/(\r\n[ \t])/)
+    .map((piece, i) => (i % 2 === 1 ? piece : piece.replace(/[\r\n]+/g, " ")))
+    .join("");
+}
