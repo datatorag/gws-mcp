@@ -102,7 +102,15 @@ export async function directUpload(
       body: chunk,
       headers: { "Content-Range": range },
       timeout: MEDIA_TIMEOUT_MS,
+      destination: "uploadSession",
     });
+    // A 308 is Resume Incomplete only when it names no Location. Anything that
+    // names one, and any other 3xx, is a real redirect, and it is refused
+    // rather than followed: the next request would carry the token.
+    if (res.status >= 300 && res.status < 400 && (res.status !== 308 || res.headers.get("location"))) {
+      await res.body?.cancel().catch(() => {});
+      throw new Error(`${label}: the upload session answered with a redirect (${res.status}), which is refused.`);
+    }
     offset = end;
     if (last) {
       const text = await readCapped(res, label);
@@ -110,6 +118,16 @@ export async function directUpload(
       return { success: true, data: parseBody(text) };
     }
     if (res.status !== 308) throwApiError(res.status, await readCapped(res, label));
+    // Google says in Range how much it holds. Anything short of every byte
+    // sent so far is refused rather than carried on from: resuming from the
+    // wrong offset would save a file that is subtly not the attachment.
+    const held = /^bytes=0-(\d+)$/.exec(res.headers.get("range") ?? "");
+    if (!held || Number(held[1]) !== end - 1) {
+      await res.body?.cancel().catch(() => {});
+      throw new Error(
+        `${label}: Google's upload session received ${held ? Number(held[1]) + 1 : 0} of the ${end} bytes sent (range header ${JSON.stringify(res.headers.get("range"))}).`
+      );
+    }
     // Nothing in an intermediate answer is needed; discard it unread.
     await res.body?.cancel().catch(() => {});
   }

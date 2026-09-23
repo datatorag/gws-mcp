@@ -66,8 +66,10 @@ describe("directUpload", () => {
       received.push(body);
       const range = (init?.headers as Record<string, string>)["Content-Range"];
       puts.push({ range, size: body.length });
+      // Google's 308 says in Range how much it now holds.
+      const upto = /^bytes \d+-(\d+)\//.exec(range)?.[1];
       return range.endsWith("/*")
-        ? new Response(null, { status: 308 })
+        ? new Response(null, { status: 308, headers: { Range: `bytes=0-${upto}` } })
         : new Response(JSON.stringify({ id: "big" }), { status: 200 });
     });
 

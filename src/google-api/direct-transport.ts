@@ -160,6 +160,13 @@ export function assertVisualizationUrl(url: string): URL {
 const DESTINATIONS = {
   api: { assert: assertGoogleApiUrl, redirect: "error" },
   visualization: { assert: assertVisualizationUrl, redirect: "manual" },
+  // A resumable upload session answers every intermediate chunk with 308
+  // Resume Incomplete. fetch treats any 308 as a redirect, and under "error"
+  // a redirect is a network error, so every resumable upload died on its
+  // first chunk with a bare TypeError. "manual" hands the 308 back unfollowed;
+  // the upload loop then refuses any 3xx that is not a Location-free 308, so
+  // the token is still never replayed anywhere.
+  uploadSession: { assert: assertGoogleApiUrl, redirect: "manual" },
 } as const;
 export type Destination = keyof typeof DESTINATIONS;
 
