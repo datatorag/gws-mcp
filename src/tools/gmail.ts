@@ -15,6 +15,7 @@ import { encodeAddressHeader, encodeHeaderValue, renderHeaders } from "./mime-he
 export { renderHeaders };
 import { buildMessage } from "../mime/build.js";
 import {
+  EXPORT_FORMATS,
   parseAttachments,
   placeFiles,
   resolveAttachments,
@@ -66,18 +67,21 @@ const emailFields = {
   },
 };
 
-/** SCRUM-279. Every tool that writes a message can carry files. */
+/** SCRUM-279. Every tool that writes a message can carry files from Drive. */
 const attachmentsField = {
   attachments: {
     type: "array",
     maxItems: 10,
     description:
-      "Files to send with the message, at most 10, 25 MB in total. Each entry is one of: a Drive file id as a string; " +
-      '{"file_id": "<id>", "as": "pdf" | "docx"} to send a Google Doc, Sheet or Slides deck as a file (docx for Docs only); ' +
-      'or {"filename": "chart.png", "mime_type": "image/png", "data": "<base64>"} for bytes you already hold, such as an image the user pasted, at most 2 MB each and 5 MB per call. ' +
+      "Drive files to send with the message, at most 10, 25 MB in total. Each entry is a Drive file id as a string, or " +
+      '{"file_id": "<id>", "as": "<format>"} to send a Google Doc, Sheet or Slides deck as a file. ' +
+      "Formats: Docs pdf, docx, txt, html, md, rtf, odt, epub; Sheets pdf, xlsx, csv, tsv, html, ods; Slides pdf, pptx, txt, odp. " +
+      'csv and tsv export one tab: add "tab": "<title>" to choose it, otherwise the first tab goes, and the response says which. ' +
+      "A Sheet as html arrives as a .zip of pages, one per tab; Slides as txt is the slides' visible text only. " +
       "Google Docs, Sheets and Slides passed by id alone are sent as links in the message, the way Gmail does, not as files. " +
-      "Other Drive files are attached as they are. " +
-      'To show an image in the body rather than at the bottom, reference it in html_body as <img src="cid:FILENAME">, where FILENAME is its filename with any character other than letters, digits, dot, dash and underscore replaced by an underscore. ' +
+      "Other Drive files are attached as they are. Files come from Drive only: to send a file, put it in Drive and pass its id. " +
+      "Two attachments may not share a filename. " +
+      'To show an image in the body rather than at the bottom, reference it in html_body as <img src="cid:FILENAME">, where FILENAME is its Drive filename with any character other than letters, digits, dot, dash and underscore replaced by an underscore. ' +
       "Sharing a Drive link is the sender's responsibility; nothing here changes who can open a file. " +
       "The response's attachments field reports each file as attached, inline, linked or exported.",
     items: {
@@ -87,18 +91,14 @@ const attachmentsField = {
           type: "object",
           properties: {
             file_id: { type: "string", description: "A Drive file id." },
-            as: { type: "string", enum: ["pdf", "docx"], description: "Export a Google Doc, Sheet or Slides deck in this format." },
+            as: {
+              type: "string",
+              enum: EXPORT_FORMATS,
+              description: "Export a Google Doc, Sheet or Slides deck in this format.",
+            },
+            tab: { type: "string", description: "For a Sheet as csv or tsv: the tab to export, by title. Defaults to the first tab." },
           },
           required: ["file_id"],
-        },
-        {
-          type: "object",
-          properties: {
-            filename: { type: "string" },
-            mime_type: { type: "string" },
-            data: { type: "string", description: "The file's bytes, base64-encoded." },
-          },
-          required: ["filename", "mime_type", "data"],
         },
       ],
     },

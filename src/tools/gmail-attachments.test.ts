@@ -3,7 +3,7 @@ import { simpleParser, type ParsedMail } from "mailparser";
 import { gmailTools, handleGmail } from "./gmail.js";
 import { validateArgs } from "./validate.js";
 import { fakeClient, payload } from "./fake-client.test-helper.js";
-import { DATA_CALL_CAP, DATA_FILE_CAP, TOTAL_CAP } from "../attachments/resolve.js";
+import { EXPORTS, TOTAL_CAP } from "../attachments/resolve.js";
 
 /** SCRUM-279: attachments on the five compose tools. These drive the real
  * handler with the argument shapes a caller sends, and read the message the
@@ -222,13 +222,14 @@ describe("refusals land before any download, and before the signature lookup", (
     ).rejects.toThrow(match);
     expect(calls.some((c) => c.download)).toBe(false);
     expect(calls.some((c) => c.upload)).toBe(false);
+    expect(calls.some((c) => c.resource === "spreadsheets.values")).toBe(false);
     expect(calls.some((c) => c.resource === "users.settings.sendAs")).toBe(false);
     expect(calls.some((c) => c.resource === "users.messages" || c.resource === "users.drafts")).toBe(false);
     return calls;
   };
 
-  it("docx on a Sheet, naming the file", async () => {
-    await refused([docMeta(ID_B, { name: "Budget", mimeType: "application/vnd.google-apps.spreadsheet" })], [{ file_id: ID_B, as: "docx" }], /"Budget" cannot be exported as docx/);
+  it("a format the source cannot take, naming the file and both halves of the pair", async () => {
+    await refused([docMeta(ID_B, { name: "Budget", mimeType: "application/vnd.google-apps.spreadsheet" })], [{ file_id: ID_B, as: "docx" }], /"Budget": Sheets cannot be exported as docx/);
   });
 
   it("as on a file that is not a Google Doc", async () => {
@@ -261,13 +262,36 @@ describe("refusals land before any download, and before the signature lookup", (
     await expect(handleGmail(client, "gmail_send", { to: "a@example.com", subject: "s", body: "x", attachments: [ID_A] })).resolves.toBeDefined();
   });
 
+  it("two attachments with one filename, naming it", async () => {
+    await refused([pdfMeta(ID_A), pdfMeta(ID_B)], [ID_A, ID_B], /Two attachments are named "report\.pdf"/);
+  });
+
+  it("two filenames that would share a Content-ID, naming both", async () => {
+    await refused(
+      [pdfMeta(ID_A, { name: "a b.pdf" }), pdfMeta(ID_B, { name: "a_b.pdf" })],
+      [ID_A, ID_B],
+      /"a b\.pdf" and "a_b\.pdf" would share the Content-ID "a_b\.pdf"/
+    );
+  });
+
+  it("the same Doc exported twice in one format is a duplicate too", async () => {
+    await refused([docMeta(), docMeta()], [{ file_id: ID_B, as: "pdf" }, { file_id: ID_B, as: "pdf" }], /Two attachments are named "Plan\.pdf"/);
+  });
+
+  it("a positive control: distinct names pass the duplicate check", async () => {
+    const { client } = fakeClient([pdfMeta(ID_A), pdfMeta(ID_B, { name: "other.pdf" }), NO_SIG, { text: "a" }, { text: "b" }, SENT]);
+    const res = await handleGmail(client, "gmail_send", { to: "a@example.com", subject: "s", body: "x", attachments: [ID_A, ID_B] });
+    expect(payload(res).attachments.map((a: { name: string }) => a.name)).toEqual(["report.pdf", "other.pdf"]);
+  });
+
   it("shape errors cost no request at all", async () => {
     for (const [attachments, match] of [
       [Array.from({ length: 11 }, () => ID_A), /at most 10/],
       [["not an id!"], /not a Drive file id/],
-      [[{ file_id: ID_A, as: "xlsx" }], /"pdf" or "docx"/],
-      [[{ filename: "a.png", mime_type: "image/png", data: "%%%" }], /not base64/],
-      [[{ filename: "a.png", data: "AAAA" }], /needs a mime_type/],
+      [[{ file_id: ID_A, as: "gif" }], /as must be one of pdf, docx/],
+      [[{ file_id: ID_A, as: "pdf", tab: "Sheet1" }], /tab applies only to "as": "csv" or "tsv"/],
+      [[{ file_id: ID_A, tab: "Sheet1" }], /tab applies only/],
+      [[{ file_id: ID_A, as: "csv", tab: "" }], /tab must be a tab title/],
       ["one-id", /must be an array/],
     ] as Array<[unknown, RegExp]>) {
       const calls = await refused([], attachments, match);
@@ -275,13 +299,13 @@ describe("refusals land before any download, and before the signature lookup", (
     }
   });
 
-  it("data over 2 MB per file, or 5 MB per call, refused from its length without decoding", async () => {
-    const over = Buffer.alloc(DATA_FILE_CAP + 1).toString("base64");
-    const calls = await refused([], [{ filename: "big.png", mime_type: "image/png", data: over }], /"big\.png" is 2\.0 MB; a file passed as data is limited to 2 MB/);
+  it("bytes in the call are not a source: the entry is refused, pointing at Drive", async () => {
+    const png = Buffer.from("89504e47", "hex").toString("base64");
+    // The v1 bytes shape gets the message that says where files come from.
+    const calls = await refused([], [{ filename: "a.png", mime_type: "image/png", data: png }], /Files are attached from Drive; put the file in Drive and pass its id/);
     expect(calls).toHaveLength(0);
-    const two = Buffer.alloc(DATA_FILE_CAP).toString("base64");
-    const three = Array.from({ length: Math.ceil(DATA_CALL_CAP / DATA_FILE_CAP) + 1 }, (_, i) => ({ filename: `p${i}.png`, mime_type: "image/png", data: two }));
-    await refused([], three, /"p2\.png" takes the files passed as data to .* at most 5 MB/);
+    // Bytes smuggled beside a real id are refused too, not silently dropped.
+    await refused([], [{ file_id: ID_A, data: png }], /has "data"; an entry takes file_id, as and tab/);
   });
 
   it("the same refusals on every tool that takes attachments", async () => {
@@ -302,22 +326,105 @@ describe("refusals land before any download, and before the signature lookup", (
   });
 });
 
-describe("bytes in the call, and inline images by cid", () => {
-  const png = Buffer.from("89504e470d0a1a0a0000", "hex");
-  const pdf = Buffer.from("%PDF-1.4 fake");
+describe("the export table, per source", () => {
+  const SHEET = "application/vnd.google-apps.spreadsheet";
+  const cases: Array<[string, string, string[], string]> = [
+    ["Docs", "application/vnd.google-apps.document", ["pdf", "docx", "txt", "html", "md", "rtf", "odt", "epub"], "xlsx"],
+    ["Sheets", SHEET, ["pdf", "xlsx", "csv", "tsv", "html", "ods"], "docx"],
+    ["Slides", "application/vnd.google-apps.presentation", ["pdf", "pptx", "txt", "odp"], "csv"],
+  ];
 
-  it("a data file referenced by cid goes inline in multipart/related; one not referenced is attached", async () => {
-    const { client, calls } = fakeClient([NO_SIG, SENT]);
+  for (const [label, type, formats, rejected] of cases) {
+    it(`${label}: accepts exactly ${formats.join(", ")}, and refuses ${rejected} naming both`, async () => {
+      expect(Object.keys(EXPORTS[type].formats)).toEqual(formats);
+      for (const as of formats) {
+        const tabbed = as === "csv" || as === "tsv";
+        const plan = [
+          docMeta(ID_B, { name: "Thing", mimeType: type }),
+          ...(tabbed ? [{ data: { sheets: [{ properties: { title: "Sheet1" } }] } }] : []),
+          NO_SIG,
+          tabbed ? { data: { values: [["a"]] } } : { text: "BYTES" },
+          SENT,
+        ];
+        const { client, calls } = fakeClient(plan);
+        const res = await handleGmail(client, "gmail_send", { to: "a@example.com", subject: "s", body: "x", attachments: [{ file_id: ID_B, as }] });
+        const format = EXPORTS[type].formats[as];
+        const mail = await mailOf(calls[calls.length - 1]);
+        expect(mail.attachments).toHaveLength(1);
+        expect(String(mail.attachments[0].filename).endsWith(format.ext)).toBe(true);
+        expect(mail.attachments[0].contentType).toBe(format.mimeType);
+        expect(payload(res).attachments[0].mode).toBe("exported");
+        if (!tabbed) {
+          const dl = calls.find((c) => c.download) as Record<string, unknown>;
+          expect(`${dl.resource}.${dl.method}`).toBe("files.export");
+          expect((dl.params as Record<string, unknown>).mimeType).toBe(format.exportAs);
+        }
+      }
+      const { client, calls } = fakeClient([docMeta(ID_B, { name: "Thing", mimeType: type })]);
+      await expect(
+        handleGmail(client, "gmail_send", { to: "a@example.com", subject: "s", body: "x", attachments: [{ file_id: ID_B, as: rejected }] })
+      ).rejects.toThrow(`"Thing": ${label} cannot be exported as ${rejected}`);
+      expect(calls).toHaveLength(1);
+    });
+  }
+
+  it("a Sheet as html is attached as a .zip, a Slides deck as txt as .txt", async () => {
+    expect(EXPORTS[SHEET].formats.html).toMatchObject({ exportAs: "application/zip", mimeType: "application/zip", ext: ".zip" });
+    expect(EXPORTS["application/vnd.google-apps.presentation"].formats.txt).toMatchObject({ exportAs: "text/plain", ext: ".txt" });
+  });
+
+  const TABS = { data: { sheets: [{ properties: { title: "Sheet1" } }, { properties: { title: "Q3 'final'" } }, { properties: { title: "Notes" } }] } };
+
+  it("csv with no tab: the first tab goes, and the response says which of how many", async () => {
+    const values = { data: { values: [["name", "note"], ["Ann", 'said "hi", then left'], ["Bo", "two\nlines"], ["Cy"]] } };
+    const { client, calls } = fakeClient([docMeta(ID_B, { name: "Budget", mimeType: SHEET }), TABS, NO_SIG, values, SENT]);
+    const res = await handleGmail(client, "gmail_send", { to: "a@example.com", subject: "s", body: "x", attachments: [{ file_id: ID_B, as: "csv" }] });
+    const read = calls.find((c) => c.resource === "spreadsheets.values") as Record<string, unknown>;
+    expect(read.params).toMatchObject({ spreadsheetId: ID_B, range: "'Sheet1'", valueRenderOption: "FORMATTED_VALUE" });
+    const mail = await mailOf(calls[calls.length - 1]);
+    expect(mail.attachments[0].filename).toBe("Budget - Sheet1.csv");
+    expect(mail.attachments[0].content.toString()).toBe('name,note\r\nAnn,"said ""hi"", then left"\r\nBo,"two\nlines"\r\nCy\r\n');
+    expect(payload(res).attachments[0]).toMatchObject({ name: "Budget - Sheet1.csv", mode: "exported", note: "exported tab Sheet1 of 3" });
+  });
+
+  it("tsv of a named tab: the title is quoted for A1 with its quotes doubled, and tabs in a cell become spaces", async () => {
+    const values = { data: { values: [["a\tb", "c"]] } };
+    const { client, calls } = fakeClient([docMeta(ID_B, { name: "Budget", mimeType: SHEET }), TABS, NO_SIG, values, SENT]);
+    const res = await handleGmail(client, "gmail_send", {
+      to: "a@example.com",
+      subject: "s",
+      body: "x",
+      attachments: [{ file_id: ID_B, as: "tsv", tab: "Q3 'final'" }],
+    });
+    const read = calls.find((c) => c.resource === "spreadsheets.values") as Record<string, unknown>;
+    expect((read.params as Record<string, unknown>).range).toBe("'Q3 ''final'''");
+    const mail = await mailOf(calls[calls.length - 1]);
+    expect(mail.attachments[0].content.toString()).toBe("a b\tc\r\n");
+    expect(payload(res).attachments[0].note).toBe("exported tab Q3 'final' of 3");
+  });
+
+  it("an unknown tab is refused before any value is read, listing the tabs", async () => {
+    const { client, calls } = fakeClient([docMeta(ID_B, { name: "Budget", mimeType: SHEET }), TABS]);
+    await expect(
+      handleGmail(client, "gmail_send", { to: "a@example.com", subject: "s", body: "x", attachments: [{ file_id: ID_B, as: "csv", tab: "Q4" }] })
+    ).rejects.toThrow(/"Budget" has no tab "Q4"; its tabs are "Sheet1", "Q3 'final'", "Notes"/);
+    expect(calls.map((c) => c.resource)).toEqual(["files", "spreadsheets"]);
+  });
+});
+
+describe("inline images by cid", () => {
+  const png = Buffer.from("89504e470d0a1a0a0000", "hex");
+  const pngMeta = (id: string, name: string) => pdfMeta(id, { name, mimeType: "image/png", size: String(png.length) });
+
+  it("a Drive image referenced by cid goes inline in multipart/related; one not referenced is attached", async () => {
+    const { client, calls } = fakeClient([pngMeta(ID_A, "chart.png"), pdfMeta(ID_B, { name: "notes.pdf" }), NO_SIG, { bytes: png }, { text: "PDF" }, SENT]);
     const res = await handleGmail(client, "gmail_send", {
       to: "a@example.com",
       subject: "s",
       html_body: '<p>chart:</p><img src="cid:chart.png">',
-      attachments: [
-        { filename: "chart.png", mime_type: "image/png", data: png.toString("base64") },
-        { filename: "notes.pdf", mime_type: "application/pdf", data: pdf.toString("base64") },
-      ],
+      attachments: [ID_A, ID_B],
     });
-    const call = calls[1];
+    const call = calls[calls.length - 1];
     const raw = (call.bytes as Buffer).toString("latin1");
     expect(raw).toMatch(/multipart\/mixed/);
     expect(raw).toMatch(/multipart\/related/);
@@ -327,55 +434,47 @@ describe("bytes in the call, and inline images by cid", () => {
     expect(byName["chart.png"].cid).toBe("chart.png");
     expect(byName["chart.png"].content.equals(png)).toBe(true);
     expect(byName["notes.pdf"].contentDisposition).toBe("attachment");
-    expect(byName["notes.pdf"].content.equals(pdf)).toBe(true);
     expect(mail.attachments).toHaveLength(2);
     expect(payload(res).attachments).toEqual([
-      { name: "chart.png", mode: "inline", source: "data", size: png.length, cid: "chart.png" },
-      { name: "notes.pdf", mode: "attached", source: "data", size: pdf.length },
+      { name: "chart.png", mode: "inline", source: "drive", file_id: ID_A, size: png.length, cid: "chart.png" },
+      { name: "notes.pdf", mode: "attached", source: "drive", file_id: ID_B, size: 3 },
     ]);
   });
 
   it("inline only: no multipart/mixed at all", async () => {
-    const { client, calls } = fakeClient([NO_SIG, DRAFT]);
+    const { client, calls } = fakeClient([pngMeta(ID_A, "chart.png"), NO_SIG, { bytes: png }, DRAFT]);
     await handleGmail(client, "gmail_create_draft", {
       to: "a@example.com",
       subject: "s",
       html_body: '<img src="cid:chart.png">',
-      attachments: [{ filename: "chart.png", mime_type: "image/png", data: png.toString("base64") }],
+      attachments: [ID_A],
     });
-    expect(`${calls[1].resource}.${calls[1].method}`).toBe("users.drafts.create");
-    const raw = (calls[1].bytes as Buffer).toString("latin1");
+    const up = calls[calls.length - 1];
+    expect(`${up.resource}.${up.method}`).toBe("users.drafts.create");
+    const raw = (up.bytes as Buffer).toString("latin1");
     expect(raw).not.toMatch(/multipart\/mixed/);
     expect(raw).toMatch(/multipart\/related/);
   });
 
   it("attached only: no multipart/related", async () => {
-    const { client, calls } = fakeClient([NO_SIG, SENT]);
-    await handleGmail(client, "gmail_send", {
-      to: "a@example.com",
-      subject: "s",
-      html_body: "<p>no image reference</p>",
-      attachments: [{ filename: "chart.png", mime_type: "image/png", data: png.toString("base64") }],
-    });
-    const raw = (calls[1].bytes as Buffer).toString("latin1");
+    const { client, calls } = fakeClient([pngMeta(ID_A, "chart.png"), NO_SIG, { bytes: png }, SENT]);
+    await handleGmail(client, "gmail_send", { to: "a@example.com", subject: "s", html_body: "<p>no image reference</p>", attachments: [ID_A] });
+    const raw = (calls[calls.length - 1].bytes as Buffer).toString("latin1");
     expect(raw).toMatch(/multipart\/mixed/);
     expect(raw).not.toMatch(/multipart\/related/);
   });
 
   it("a name with spaces gets the documented cid, and a near-miss reference does not count", async () => {
-    const { client, calls } = fakeClient([NO_SIG, SENT]);
+    const { client, calls } = fakeClient([pngMeta(ID_A, "my chart.png"), pngMeta(ID_B, "logo.png"), NO_SIG, { bytes: png }, { bytes: png }, SENT]);
     await handleGmail(client, "gmail_send", {
       to: "a@example.com",
       subject: "s",
       // logo.png's cid is a prefix of the only logo reference, which names a
       // different file; that must not pull logo.png inline.
       html_body: '<img src="cid:my_chart.png"><img src="cid:logo.png2">',
-      attachments: [
-        { filename: "my chart.png", mime_type: "image/png", data: png.toString("base64") },
-        { filename: "logo.png", mime_type: "image/png", data: png.toString("base64") },
-      ],
+      attachments: [ID_A, ID_B],
     });
-    const mail = await mailOf(calls[1]);
+    const mail = await mailOf(calls[calls.length - 1]);
     const byName = Object.fromEntries(mail.attachments.map((a) => [a.filename, a.contentDisposition]));
     expect(byName).toEqual({ "my chart.png": "inline", "logo.png": "attachment" });
   });
@@ -441,6 +540,17 @@ describe("reply, forward and the draft tools", () => {
     const raw = (calls[calls.length - 1].bytes as Buffer).toString("latin1");
     expect(raw).not.toMatch(/\r\nBcc:/i);
     expect(raw).toContain("Content-ID: <logo.png>");
+  });
+
+  it("originals that share a filename are still forwarded: the ruling on duplicates is for the caller's files", async () => {
+    const twin = structuredClone(ORIGINAL_WITH_FILES);
+    twin.data.payload.parts.push({ mimeType: "application/pdf", filename: "invoice.pdf", body: { attachmentId: "att-inv2", size: 3 } });
+    const { client, calls } = fakeClient([NO_SIG, twin, gmailAttachment("LOGO"), gmailAttachment("INVOICE"), gmailAttachment("TWO"), SENT]);
+    await handleGmail(client, "gmail_forward", { message_id: "m1", to: "b@example.com", body: "fyi" });
+    const mail = await mailOf(calls[calls.length - 1]);
+    const invoices = mail.attachments.filter((a) => a.filename === "invoice.pdf");
+    expect(invoices.map((a) => a.content.toString())).toEqual(["INVOICE", "TWO"]);
+    expect(new Set(invoices.map((a) => a.cid)).size).toBe(2);
   });
 
   it("forward with include_original_attachments false sends the text alone, as before", async () => {

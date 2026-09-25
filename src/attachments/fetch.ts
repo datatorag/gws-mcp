@@ -2,18 +2,22 @@ import type { GwsClient } from "../gws-client.js";
 import { gmailAttachmentBytes } from "../google-api/direct-upload.js";
 
 /**
- * The three places attachment bytes come from (SCRUM-279), behind one shape:
+ * The places attachment bytes come from (SCRUM-279), behind one shape:
  * a function that opens an async byte source when the message stream reaches
  * that file. Nothing is fetched until then, and nothing is held whole.
  *
  *   drive     a Drive file's own bytes (files.get alt=media)
  *   export    a Google Doc, Sheet or Slides deck rendered by files.export
+ *   sheetTab  one tab of a Sheet as csv or tsv. files.export renders only
+ *             the first tab in those formats, so the tab's displayed values
+ *             are read through the Sheets API and written out here
  *   gmail     an attachment on a message being forwarded (attachments.get,
  *             whose base64url JSON is decoded as it streams)
  */
 export type ByteSource =
   | { kind: "drive"; fileId: string }
   | { kind: "export"; fileId: string; mimeType: string }
+  | { kind: "sheetTab"; spreadsheetId: string; tab: string; delimiter: "csv" | "tsv" }
   | { kind: "gmail"; messageId: string; attachmentId: string };
 
 export type Opener = () => AsyncIterable<Uint8Array>;
@@ -38,6 +42,21 @@ export function opener(client: GwsClient, source: ByteSource): Opener {
         yield* fromStream(res.stream);
         return;
       }
+      case "sheetTab": {
+        // A title is quoted in A1 notation, with any quote in it doubled.
+        const res = await client.api("sheets", "spreadsheets.values", "get", {
+          params: {
+            spreadsheetId: source.spreadsheetId,
+            range: `'${source.tab.replace(/'/g, "''")}'`,
+            valueRenderOption: "FORMATTED_VALUE",
+          },
+        });
+        const rows = ((res.data as { values?: unknown[][] } | undefined)?.values ?? []).map((row) =>
+          row.map((cell) => (cell === null || cell === undefined ? "" : String(cell)))
+        );
+        yield Buffer.from(delimited(rows, source.delimiter), "utf8");
+        return;
+      }
       case "gmail": {
         const res = await client.download("gmail", "users.messages.attachments", "get", {
           userId: "me",
@@ -49,6 +68,17 @@ export function opener(client: GwsClient, source: ByteSource): Opener {
       }
     }
   };
+}
+
+/** Rows as CSV (RFC 4180: a field holding a comma, quote or line break is
+ * quoted, quotes doubled) or TSV (a tab or line break inside a field would
+ * start a new column or row, so each becomes a space; TSV has no quoting). */
+export function delimited(rows: string[][], kind: "csv" | "tsv"): string {
+  const line = (row: string[]) =>
+    kind === "csv"
+      ? row.map((f) => (/[",\r\n]/.test(f) ? `"${f.replace(/"/g, '""')}"` : f)).join(",")
+      : row.map((f) => f.replace(/[\t\r\n]+/g, " ")).join("\t");
+  return rows.map(line).join("\r\n") + (rows.length > 0 ? "\r\n" : "");
 }
 
 /** A running byte budget shared by every file in one message.

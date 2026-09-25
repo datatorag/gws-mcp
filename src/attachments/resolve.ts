@@ -1,29 +1,113 @@
 import type { GwsClient } from "../gws-client.js";
 import type { ByteAttachment } from "../mime/build.js";
 import { safeFilename, safeMimeType } from "../mime/build.js";
-import { ByteBudget, mb, opener, type Opener } from "./fetch.js";
+import { ByteBudget, mb, opener, type ByteSource, type Opener } from "./fetch.js";
 
 /**
  * What each attachment entry becomes, decided before a single byte is
  * fetched (SCRUM-279).
  *
- * An entry is a Drive file id (a string, or `{file_id, as}` to export a Google
- * Doc, Sheet or Slides deck), or bytes carried in the call
- * (`{filename, mime_type, data}`). A forward adds the original message's own
- * attachments. Every refusal here happens before any download: shapes and
- * inline sizes synchronously, Drive metadata and the 25 MB total once the
- * metadata is in. A refused call sends nothing and fetches nothing.
+ * An entry is a Drive file id: a string, or `{file_id, as, tab}` to export a
+ * Google Doc, Sheet or Slides deck. Files come from Drive and nowhere else;
+ * bytes typed into the call are not a source, because a model transcribing a
+ * file into a tool argument is exactly the transfer an MCP call should not
+ * carry. A forward adds the original message's own attachments.
+ *
+ * Every refusal happens before any download: entry shapes synchronously,
+ * then, once Drive's metadata is in, folders, formats a file cannot take, an
+ * unknown tab, duplicate filenames and the 25 MB total. A refused call sends
+ * nothing and fetches no file.
  */
 
 export const MAX_ENTRIES = 10;
 /** Raw bytes, as the user counts them; base64 growth is the transport's. */
 export const TOTAL_CAP = 25 * 1024 * 1024;
-export const DATA_FILE_CAP = 2 * 1024 * 1024;
-export const DATA_CALL_CAP = 5 * 1024 * 1024;
 
-export type ParsedEntry =
-  | { kind: "drive"; fileId: string; as?: "pdf" | "docx" }
-  | { kind: "data"; filename: string; mimeType: string; bytes: Buffer };
+const DOC = "application/vnd.google-apps.document";
+const SHEET = "application/vnd.google-apps.spreadsheet";
+const SLIDES = "application/vnd.google-apps.presentation";
+
+interface ExportFormat {
+  /** What files.export is asked for, or `sheetTab` for csv and tsv, which
+   * are one tab each and read through the Sheets API. */
+  exportAs: string | { sheetTab: "csv" | "tsv" };
+  /** What the attached file is declared as. */
+  mimeType: string;
+  ext: string;
+}
+
+/** Google's export set for each native type, as (source type, format). A
+ * pair not in this table is refused, naming both. */
+export const EXPORTS: Record<string, { label: string; formats: Record<string, ExportFormat> }> = {
+  [DOC]: {
+    label: "Docs",
+    formats: {
+      pdf: { exportAs: "application/pdf", mimeType: "application/pdf", ext: ".pdf" },
+      docx: {
+        exportAs: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ext: ".docx",
+      },
+      txt: { exportAs: "text/plain", mimeType: "text/plain", ext: ".txt" },
+      html: { exportAs: "text/html", mimeType: "text/html", ext: ".html" },
+      md: { exportAs: "text/markdown", mimeType: "text/markdown", ext: ".md" },
+      rtf: { exportAs: "application/rtf", mimeType: "application/rtf", ext: ".rtf" },
+      odt: {
+        exportAs: "application/vnd.oasis.opendocument.text",
+        mimeType: "application/vnd.oasis.opendocument.text",
+        ext: ".odt",
+      },
+      epub: { exportAs: "application/epub+zip", mimeType: "application/epub+zip", ext: ".epub" },
+    },
+  },
+  [SHEET]: {
+    label: "Sheets",
+    formats: {
+      pdf: { exportAs: "application/pdf", mimeType: "application/pdf", ext: ".pdf" },
+      xlsx: {
+        exportAs: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ext: ".xlsx",
+      },
+      csv: { exportAs: { sheetTab: "csv" }, mimeType: "text/csv", ext: ".csv" },
+      tsv: { exportAs: { sheetTab: "tsv" }, mimeType: "text/tab-separated-values", ext: ".tsv" },
+      // Google renders a spreadsheet as HTML inside a zip, one page per tab.
+      html: { exportAs: "application/zip", mimeType: "application/zip", ext: ".zip" },
+      ods: {
+        exportAs: "application/vnd.oasis.opendocument.spreadsheet",
+        mimeType: "application/vnd.oasis.opendocument.spreadsheet",
+        ext: ".ods",
+      },
+    },
+  },
+  [SLIDES]: {
+    label: "Slides",
+    formats: {
+      pdf: { exportAs: "application/pdf", mimeType: "application/pdf", ext: ".pdf" },
+      pptx: {
+        exportAs: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ext: ".pptx",
+      },
+      // The slides' visible text only.
+      txt: { exportAs: "text/plain", mimeType: "text/plain", ext: ".txt" },
+      odp: {
+        exportAs: "application/vnd.oasis.opendocument.presentation",
+        mimeType: "application/vnd.oasis.opendocument.presentation",
+        ext: ".odp",
+      },
+    },
+  },
+};
+
+/** Every format any source accepts, for the schema's enum. */
+export const EXPORT_FORMATS = [...new Set(Object.values(EXPORTS).flatMap((s) => Object.keys(s.formats)))];
+
+export interface ParsedEntry {
+  fileId: string;
+  as?: string;
+  tab?: string;
+}
 
 /** A part of a message being forwarded that carries a filename. */
 export interface OriginalPart {
@@ -42,11 +126,13 @@ export type Mode = "attached" | "inline" | "linked" | "exported";
 export interface ReportEntry {
   name: string;
   mode: Mode;
-  source: "drive" | "data" | "original";
+  source: "drive" | "original";
   file_id?: string;
   size?: number;
   link?: string;
   cid?: string;
+  /** For a one-tab export, which tab went: "exported tab Sheet1 of 3". */
+  note?: string;
 }
 
 export interface PlannedFile {
@@ -64,29 +150,11 @@ export interface Resolved {
 }
 
 const DRIVE_ID = /^[A-Za-z0-9_-]{1,200}$/;
-const BASE64 = /^[A-Za-z0-9+/_-]*={0,2}$/;
 const NATIVE = "application/vnd.google-apps.";
 const FOLDER = "application/vnd.google-apps.folder";
 
-/** What `as` may turn each native type into. Docs alone has a docx form. */
-const EXPORTS: Record<string, Partial<Record<"pdf" | "docx", { mimeType: string; ext: string }>>> = {
-  "application/vnd.google-apps.document": {
-    pdf: { mimeType: "application/pdf", ext: ".pdf" },
-    docx: { mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ext: ".docx" },
-  },
-  "application/vnd.google-apps.spreadsheet": { pdf: { mimeType: "application/pdf", ext: ".pdf" } },
-  "application/vnd.google-apps.presentation": { pdf: { mimeType: "application/pdf", ext: ".pdf" } },
-};
-
 function refuse(message: string): never {
   throw new Error(`${message} Nothing was sent.`);
-}
-
-/** Decoded size of a base64 string, computed from its length so an
- * oversized one is refused without decoding it. */
-function decodedLength(clean: string): number {
-  const pad = clean.endsWith("==") ? 2 : clean.endsWith("=") ? 1 : 0;
-  return Math.floor((clean.length * 3) / 4) - pad;
 }
 
 /** Every shape rule, synchronously, so a malformed call costs no request. */
@@ -94,41 +162,32 @@ export function parseAttachments(value: unknown): ParsedEntry[] {
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value)) refuse("attachments must be an array.");
   if (value.length > MAX_ENTRIES) refuse(`attachments holds ${value.length} entries; one message takes at most ${MAX_ENTRIES}.`);
-  let dataTotal = 0;
   return value.map((entry, i): ParsedEntry => {
     if (typeof entry === "string") {
       if (!DRIVE_ID.test(entry)) refuse(`attachments[${i}] is not a Drive file id: ${JSON.stringify(entry.slice(0, 80))}.`);
-      return { kind: "drive", fileId: entry };
+      return { fileId: entry };
     }
-    if (!entry || typeof entry !== "object") refuse(`attachments[${i}] must be a Drive file id or an object.`);
+    if (!entry || typeof entry !== "object" || (entry as Record<string, unknown>).file_id === undefined) {
+      refuse(
+        `attachments[${i}] must be a Drive file id, or {"file_id": ..., "as": ...}. Files are attached from Drive; put the file in Drive and pass its id.`
+      );
+    }
     const e = entry as Record<string, unknown>;
-    if (e.file_id !== undefined) {
-      if (typeof e.file_id !== "string" || !DRIVE_ID.test(e.file_id)) {
-        refuse(`attachments[${i}].file_id is not a Drive file id.`);
-      }
-      if (e.as !== undefined && e.as !== "pdf" && e.as !== "docx") {
-        refuse(`attachments[${i}].as must be "pdf" or "docx".`);
-      }
-      if (e.data !== undefined || e.filename !== undefined) {
-        refuse(`attachments[${i}] gives both a Drive file_id and inline data; pick one.`);
-      }
-      return { kind: "drive", fileId: e.file_id, ...(e.as ? { as: e.as as "pdf" | "docx" } : {}) };
+    const extra = Object.keys(e).filter((k) => !["file_id", "as", "tab"].includes(k));
+    if (extra.length > 0) refuse(`attachments[${i}] has ${extra.map((k) => `"${k}"`).join(", ")}; an entry takes file_id, as and tab.`);
+    if (typeof e.file_id !== "string" || !DRIVE_ID.test(e.file_id)) refuse(`attachments[${i}].file_id is not a Drive file id.`);
+    if (e.as !== undefined && (typeof e.as !== "string" || !EXPORT_FORMATS.includes(e.as))) {
+      refuse(`attachments[${i}].as must be one of ${EXPORT_FORMATS.join(", ")}.`);
     }
-    if (typeof e.filename !== "string" || e.filename.trim() === "") refuse(`attachments[${i}] needs a filename.`);
-    const name = e.filename as string;
-    if (typeof e.mime_type !== "string" || e.mime_type === "") refuse(`"${name}" needs a mime_type.`);
-    if (typeof e.data !== "string") refuse(`"${name}" needs data, the file's bytes in base64.`);
-    const clean = (e.data as string).replace(/\s+/g, "");
-    if (clean === "" || !BASE64.test(clean)) refuse(`"${name}" data is not base64.`);
-    const size = decodedLength(clean);
-    if (size > DATA_FILE_CAP) {
-      refuse(`"${name}" is ${mb(size)}; a file passed as data is limited to ${mb(DATA_FILE_CAP)}. Put larger files in Drive and pass the id.`);
+    if (e.tab !== undefined && (typeof e.tab !== "string" || e.tab === "")) refuse(`attachments[${i}].tab must be a tab title.`);
+    if (e.tab !== undefined && e.as !== "csv" && e.as !== "tsv") {
+      refuse(`attachments[${i}].tab applies only to "as": "csv" or "tsv", which export one tab.`);
     }
-    dataTotal += size;
-    if (dataTotal > DATA_CALL_CAP) {
-      refuse(`"${name}" takes the files passed as data to ${mb(dataTotal)}; one call carries at most ${mb(DATA_CALL_CAP)} that way. Put larger files in Drive and pass the ids.`);
-    }
-    return { kind: "data", filename: name, mimeType: e.mime_type as string, bytes: Buffer.from(clean, "base64") };
+    return {
+      fileId: e.file_id as string,
+      ...(e.as ? { as: e.as as string } : {}),
+      ...(e.tab ? { tab: e.tab as string } : {}),
+    };
   });
 }
 
@@ -177,7 +236,27 @@ async function driveMetadata(client: GwsClient, fileId: string): Promise<DriveMe
   }
 }
 
-/** Metadata in, the per-file decision and the size check out. Nothing is
+/** A spreadsheet's tab titles, in order, so a one-tab export can name the
+ * tab it took and refuse one that does not exist before any download. */
+async function sheetTabs(client: GwsClient, spreadsheetId: string, name: string): Promise<string[]> {
+  let titles: string[];
+  try {
+    const res = await client.api("sheets", "spreadsheets", "get", {
+      params: { spreadsheetId, fields: "sheets.properties.title" },
+    });
+    const sheets = (res.data as { sheets?: Array<{ properties?: { title?: string } }> } | undefined)?.sheets ?? [];
+    titles = sheets.map((s) => s.properties?.title).filter((t): t is string => typeof t === "string");
+  } catch (err) {
+    const why = err instanceof Error ? err.message : String(err);
+    refuse(`The tabs of "${name}" could not be read: ${why}.`);
+  }
+  if (titles.length === 0) refuse(`"${name}" reports no tabs to export.`);
+  return titles;
+}
+
+type Pending = Omit<PlannedFile, "open"> & { source: ByteSource | Buffer; known?: number };
+
+/** Metadata in, the per-file decision and the size check out. No file is
  * downloaded here; the openers it returns fetch when the message is streamed. */
 export async function resolveAttachments(
   client: GwsClient,
@@ -187,33 +266,32 @@ export async function resolveAttachments(
   // A forward passes its originals as the pending fetch, so the Drive
   // metadata and the original message are read together.
   const [metas, originals] = await Promise.all([
-    Promise.all(entries.map((e) => (e.kind === "drive" ? driveMetadata(client, e.fileId) : Promise.resolve(undefined)))),
+    Promise.all(entries.map((e) => driveMetadata(client, e.fileId))),
     originalsIn,
   ]);
 
   const links: Resolved["links"] = [];
   // In the order the caller gave them, originals last.
   const report: ReportEntry[] = [];
-  const pending: Array<Omit<PlannedFile, "open"> & { source: Parameters<typeof opener>[1] | Buffer; known?: number }> = [];
-  const plan = (p: (typeof pending)[number]) => {
+  const pending: Pending[] = [];
+  const plan = (p: Pending) => {
     pending.push(p);
     report.push(p.report);
   };
 
+  // The tab lists a csv or tsv export needs, read alongside each other.
+  const tabs = await Promise.all(
+    entries.map((entry, i) => {
+      const meta = metas[i];
+      const format = entry.as ? EXPORTS[meta.mimeType ?? ""]?.formats[entry.as] : undefined;
+      return format && typeof format.exportAs === "object"
+        ? sheetTabs(client, entry.fileId, safeFilename(meta.name ?? entry.fileId))
+        : Promise.resolve(undefined);
+    })
+  );
+
   entries.forEach((entry, i) => {
-    if (entry.kind === "data") {
-      const name = safeFilename(entry.filename);
-      plan({
-        filename: name,
-        mimeType: safeMimeType(entry.mimeType),
-        contentId: contentIdFor(name),
-        source: entry.bytes,
-        known: entry.bytes.length,
-        report: { name, mode: "attached", source: "data", size: entry.bytes.length },
-      });
-      return;
-    }
-    const meta = metas[i] as DriveMeta;
+    const meta = metas[i];
     const name = safeFilename(meta.name ?? entry.fileId);
     const type = meta.mimeType ?? "";
     if (type === FOLDER) refuse(`"${name}" (${entry.fileId}) is a folder; only files can be attached.`);
@@ -224,17 +302,33 @@ export async function resolveAttachments(
         report.push({ name, mode: "linked", source: "drive", file_id: entry.fileId, link });
         return;
       }
-      const target = EXPORTS[type]?.[entry.as];
-      if (!target) {
-        refuse(`"${name}" cannot be exported as ${entry.as}: Docs export as pdf or docx, Sheets and Slides as pdf.`);
+      const source = EXPORTS[type];
+      const format = source?.formats[entry.as];
+      if (!source) refuse(`"${name}" is a Google file type that cannot be exported; pass the id alone to send it as a link.`);
+      if (!format) refuse(`"${name}": ${source.label} cannot be exported as ${entry.as}.`);
+      let filename = name.toLowerCase().endsWith(format.ext) ? name : `${name}${format.ext}`;
+      let byteSource: ByteSource;
+      let note: string | undefined;
+      if (typeof format.exportAs === "object") {
+        const titles = tabs[i] as string[];
+        const tab = entry.tab ?? titles[0];
+        const index = titles.indexOf(tab);
+        if (index === -1) {
+          refuse(`"${name}" has no tab "${entry.tab}"; its tabs are ${titles.map((t) => `"${t}"`).join(", ")}.`);
+        }
+        filename = `${name} - ${tab}${format.ext}`;
+        byteSource = { kind: "sheetTab", spreadsheetId: entry.fileId, tab, delimiter: format.exportAs.sheetTab };
+        note = `exported tab ${tab} of ${titles.length}`;
+      } else {
+        byteSource = { kind: "export", fileId: entry.fileId, mimeType: format.exportAs };
       }
-      const filename = name.toLowerCase().endsWith(target.ext) ? name : `${name}${target.ext}`;
+      const safe = safeFilename(filename);
       plan({
-        filename,
-        mimeType: target.mimeType,
-        contentId: contentIdFor(filename),
-        source: { kind: "export", fileId: entry.fileId, mimeType: target.mimeType },
-        report: { name: filename, mode: "exported", source: "drive", file_id: entry.fileId },
+        filename: safe,
+        mimeType: format.mimeType,
+        contentId: contentIdFor(safe),
+        source: byteSource,
+        report: { name: safe, mode: "exported", source: "drive", file_id: entry.fileId, ...(note ? { note } : {}) },
       });
       return;
     }
@@ -253,16 +347,45 @@ export async function resolveAttachments(
     });
   });
 
+  // Two of the caller's files with one name would share a Content-ID, so a
+  // `cid:` reference could not say which it meant, and the recipient would
+  // see two attachments they cannot tell apart. Refused, naming the name.
+  // The same holds for two names that differ only in the characters a
+  // Content-ID replaces ("a b.png" and "a_b.png").
+  const seen = new Map<string, string>();
+  for (const p of pending) {
+    const clash = seen.get(p.contentId);
+    if (clash !== undefined) {
+      refuse(
+        clash === p.filename
+          ? `Two attachments are named "${p.filename}"; each file in a message needs its own name.`
+          : `"${clash}" and "${p.filename}" would share the Content-ID "${p.contentId}"; rename one of them.`
+      );
+    }
+    seen.set(p.contentId, p.filename);
+  }
+
   for (const part of originals) {
     const name = safeFilename(part.filename);
     const source = part.attachmentId
       ? { kind: "gmail" as const, messageId: part.messageId, attachmentId: part.attachmentId }
       : Buffer.from(part.data ?? "", "base64url");
     const known = Buffer.isBuffer(source) ? source.length : (part.size ?? 0);
+    // An original keeps its own Content-ID, which is what its quoted HTML
+    // references. One without gets a derived id, made unique rather than
+    // refused: mail routinely carries two files with one name, and nothing
+    // can reference an original that never had an id of its own.
+    let contentId = inboundContentId(part.contentId);
+    if (!contentId) {
+      const base = contentIdFor(name);
+      contentId = base;
+      for (let n = 2; seen.has(contentId); n++) contentId = `${n}.${base}`;
+    }
+    seen.set(contentId, name);
     plan({
       filename: name,
       mimeType: safeMimeType(part.mimeType),
-      contentId: inboundContentId(part.contentId) ?? contentIdFor(name),
+      contentId,
       source,
       known,
       report: { name, mode: "attached", source: "original", size: known },
@@ -287,11 +410,11 @@ export async function resolveAttachments(
           yield p.source as Buffer;
         }
       : opener(client, p.source);
-    const report = p.report;
+    const entryReport = p.report;
     const open = budget.meter(p.filename, raw, (bytes) => {
-      report.size = bytes;
+      entryReport.size = bytes;
     });
-    return { filename: p.filename, mimeType: p.mimeType, contentId: p.contentId, report, open };
+    return { filename: p.filename, mimeType: p.mimeType, contentId: p.contentId, report: entryReport, open };
   });
 
   return { links, files, report };
