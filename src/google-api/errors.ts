@@ -4,9 +4,11 @@
  * caller — human or model — treats "Proxy failed to connect to upstream
  * server" as a fact about the request and rewrites a call that was correct.
  * Two different sessions hit that same message on one day and both succeeded
- * on an immediate retry. Naming the class is the whole fix: nothing here
- * retries on the caller's behalf, because a retry that hides a real outage is
- * how a broken integration looks healthy. */
+ * on an immediate retry. Naming the class is most of the fix. The one thing
+ * retried on the caller's behalf is a read Google refused for rate
+ * (rate-limit-retry.ts), where the answer itself says the request did not
+ * run; a failure of the path to Google is never retried here, because a retry
+ * that hides a real outage is how a broken integration looks healthy. */
 export class TransientGwsError extends Error {
   readonly retryable = true;
   constructor(message: string) {

@@ -265,6 +265,8 @@ Every tool calls `client.api(service, resource, method, { params, jsonBody })`. 
 
 The token travels in the `Authorization` header only: never in a URL, a log line or an error. Requests go only to `*.googleapis.com`, redirects are refused, and a resumable upload's session URL is checked against the same rule before anything is sent to it.
 
+**Rate-limit refusals are retried, for reads.** When Google answers a GET with `429`, or with `403` and a rate reason (`rateLimitExceeded`, `userRateLimitExceeded`), the direct transport sends it again: up to three requests per call, exponential backoff with full jitter, at most 8 seconds of added wait, and Google's `Retry-After` honoured (a longer one stops the retry). A refusal that outlasts the attempts surfaces as the same error, with its transient hint. Writes and uploads are never retried, and neither are gateway failures (502, 503, 504) or daily limits. The rule and its reasons are in `src/google-api/rate-limit-retry.ts`.
+
 To refresh the method table after Google changes an API: `node scripts/generate-method-table.mjs`, then `pnpm test` (the oracle needs `pnpm run download-binaries`).
 
 The extension (`extension.ts`) runs via stdio for Claude Desktop `.mcpb` bundles. The HTTP server (`index.ts`) runs as a standalone process for Claude Code or other MCP clients. Both share the same `createMcpServer()` factory.

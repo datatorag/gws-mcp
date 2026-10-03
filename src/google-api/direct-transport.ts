@@ -1,5 +1,6 @@
 import { buildRequest, requestUrl, type BuiltRequest, supportsMediaDownload } from "./request.js";
 import { TransientGwsError, isTransient } from "./errors.js";
+import { MAX_ATTEMPTS, isRateLimited, retryClock, retryWaitMs } from "./rate-limit-retry.js";
 
 /** One default per call; media moves more bytes and gets longer (SCRUM-289). */
 export const DEFAULT_TIMEOUT_MS = 30_000;
@@ -227,6 +228,38 @@ function send(
   return sendAuthorized(token, { method: request.method, url: requestUrl(request, init.extraQuery) }, label, init);
 }
 
+/** Send, and hand back only an answer that succeeded.
+ *
+ * A read refused for rate is sent again, up to MAX_ATTEMPTS requests in all
+ * (see rate-limit-retry.ts for what counts and why writes are left alone).
+ * Anything else, and a refusal that outlasts the attempts, is thrown as the
+ * same error the single request always produced. The log line names the
+ * method and the numbers and nothing from the request. */
+async function sendOk(
+  token: string,
+  request: BuiltRequest,
+  label: string,
+  init: { body?: string; headers?: Record<string, string>; timeout: number; extraQuery?: Array<[string, string]> }
+): Promise<Response> {
+  const isRead = request.method === "GET";
+  let waited = 0;
+  for (let attempt = 1; ; attempt++) {
+    const res = await send(token, request, label, init);
+    if (res.ok) return res;
+    const text = await readCapped(res, label);
+    if (isRead && attempt < MAX_ATTEMPTS && isRateLimited(res.status, text)) {
+      const wait = retryWaitMs(attempt, res.headers.get("retry-after"), waited);
+      if (wait !== null) {
+        console.error(`rate-limit retry: ${label} answered ${res.status}, attempt ${attempt} of ${MAX_ATTEMPTS}, waiting ${wait}ms`);
+        waited += wait;
+        await retryClock.sleep(wait);
+        continue;
+      }
+    }
+    throwApiError(res.status, text);
+  }
+}
+
 /** The CLI transport parsed stdout as JSON and fell back to the trimmed text;
  * an empty body therefore read as "". Callers were written against that. */
 function parseBody(text: string): unknown {
@@ -263,15 +296,13 @@ export async function directApi(
 
   const hasBody = options?.jsonBody !== undefined && options?.jsonBody !== null;
   const once = async (limit: number, extraQuery?: Array<[string, string]>) => {
-    const res = await send(token, request, label, {
+    const res = await sendOk(token, request, label, {
       body: hasBody ? JSON.stringify(options?.jsonBody) : undefined,
       headers: hasBody ? { "Content-Type": "application/json" } : undefined,
       timeout: options?.pageAll ? PAGE_ALL_TIMEOUT_MS : DEFAULT_TIMEOUT_MS,
       extraQuery,
     });
-    const text = await readCapped(res, label, limit);
-    if (!res.ok) throwApiError(res.status, text);
-    return text;
+    return readCapped(res, label, limit);
   };
 
   if (!options?.pageAll) return { success: true, data: parseBody(await once(MAX_RESPONSE_BYTES)) };
@@ -323,8 +354,7 @@ export async function directDownload(
   const media = supportsMediaDownload(service, resource, method);
   const request = buildRequest(service, resource, method, { params: media ? { ...params, alt: "media" } : params });
   const label = `${service} ${resource} ${method}`;
-  const res = await send(token, request, label, { timeout: MEDIA_TIMEOUT_MS });
-  if (!res.ok) throwApiError(res.status, await readCapped(res, label));
+  const res = await sendOk(token, request, label, { timeout: MEDIA_TIMEOUT_MS });
   if (!res.body) throw new Error(`${label} returned no content`);
   const length = Number(res.headers.get("content-length"));
   return {
