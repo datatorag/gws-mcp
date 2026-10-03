@@ -237,11 +237,37 @@ describe("how long a retry waits", () => {
     expect(retryWaitMs(1, String(MAX_ADDED_WAIT_MS / 1000), 0, () => 0)).toBe(MAX_ADDED_WAIT_MS);
   });
 
-  it("reads Retry-After as a date too, and ignores one it cannot read", () => {
+  it("reads Retry-After as an HTTP date that is still ahead", () => {
     const now = Date.parse("2026-10-02T12:00:00Z");
     expect(retryWaitMs(1, "Fri, 02 Oct 2026 12:00:02 GMT", 0, () => 0, now)).toBe(2000);
-    expect(retryWaitMs(1, "Fri, 02 Oct 2026 11:59:00 GMT", 0, () => 0, now)).toBe(0);
-    expect(retryWaitMs(1, "soon", 0, () => 0.5)).toBe(500);
+  });
+
+  it("a date already past falls back to the jittered backoff, not to a wait of zero", () => {
+    const now = Date.parse("2026-10-02T12:00:00Z");
+    expect(retryWaitMs(1, "Fri, 02 Oct 2026 11:59:00 GMT", 0, () => 0.5, now)).toBe(500);
+    expect(retryWaitMs(2, "Fri, 02 Oct 2026 12:00:00 GMT", 0, () => 0.5, now)).toBe(1000);
+  });
+
+  it("anything that is neither whole seconds nor an HTTP date falls back to the backoff", () => {
+    // Date.parse reads each of the first two as a date in 2001.
+    for (const junk of ["1.5", "-5", "soon", "", "2026-10-02T12:00:02Z", "Oct 2 2026", "3 seconds", "0x10"]) {
+      expect(retryWaitMs(1, junk, 0, () => 0.5), JSON.stringify(junk)).toBe(500);
+    }
+  });
+
+  it("whole seconds are still honoured exactly, zero included", () => {
+    expect(retryWaitMs(1, "0", 0, () => 0.5)).toBe(0);
+    expect(retryWaitMs(1, " 2 ", 0, () => 0.5)).toBe(2000);
+  });
+
+  it("junk on the wire: the call still retries, with jitter", async () => {
+    const gmail = agent.get(GMAIL);
+    gmail.intercept({ path: LIST, method: "GET" }).reply(429, CONCURRENT, { headers: { "retry-after": "1.5" } });
+    gmail.intercept({ path: LIST, method: "GET" }).reply(200, { messages: [] });
+    vi.spyOn(retryClock, "random").mockReturnValue(0.5);
+
+    await list();
+    expect(waits).toEqual([500]);
   });
 });
 

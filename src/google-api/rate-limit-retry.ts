@@ -72,14 +72,25 @@ export function isRateLimited(status: number, bodyText: string): boolean {
   return status === 429 || given.some((r) => RATE_REASONS.has(r));
 }
 
-/** Retry-After in milliseconds: delta-seconds or an HTTP date. Undefined
- * when absent or unreadable, so the caller falls back to its own backoff. */
+/** The one date form HTTP still sends: `Fri, 02 Oct 2026 12:00:02 GMT`. */
+const HTTP_DATE = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$/;
+
+/** Retry-After in milliseconds: whole delta-seconds, or an HTTP date still
+ * ahead of now. Undefined for anything else, so the caller falls back to its
+ * own jittered backoff.
+ *
+ * The date form is matched before it is parsed. `Date.parse` reads far more
+ * than HTTP dates: "1.5" and "-5" both parse, to dates in 2001, and a value
+ * read that way came out as a wait of zero, which is a retry with no backoff
+ * and no jitter. A real date already in the past is treated the same way: it
+ * asks for no wait, and no wait is the one answer backoff exists to avoid. */
 function retryAfterMs(header: string | null, now: number): number | undefined {
   if (header === null) return undefined;
   const trimmed = header.trim();
   if (/^\d+$/.test(trimmed)) return Number(trimmed) * 1000;
+  if (!HTTP_DATE.test(trimmed)) return undefined;
   const at = Date.parse(trimmed);
-  return Number.isNaN(at) ? undefined : Math.max(0, at - now);
+  return Number.isNaN(at) || at <= now ? undefined : at - now;
 }
 
 /** How long to wait before the request after attempt number `attempt`, or
