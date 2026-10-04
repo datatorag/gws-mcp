@@ -145,6 +145,23 @@ interface SendAsEntry {
 const addressOf = (header: string) =>
   (/<([^>]+)>/.exec(header)?.[1] ?? header).trim().toLowerCase();
 
+/** The addresses this account sends as: its own address and its aliases.
+ * What Reply all leaves out, so a reply to everyone does not mail the account
+ * itself (SCRUM-368). Empty when the list cannot be read: leaving nobody out
+ * costs a copy to yourself, where failing would cost the reply. Not cached,
+ * for the reason given below. */
+export async function ownAddresses(client: GwsClient): Promise<string[]> {
+  try {
+    const result = await client.api("gmail", "users.settings.sendAs", "list", {
+      params: { userId: "me" },
+    });
+    const entries = (result.data as { sendAs?: SendAsEntry[] } | undefined)?.sendAs ?? [];
+    return entries.map((e) => e.sendAsEmail).filter((e): e is string => typeof e === "string" && e !== "");
+  } catch {
+    return [];
+  }
+}
+
 /** Read the account's signature.
  *
  * NO CACHE, AT ANY LEVEL. `create-server.ts` builds a new GwsClient per tool

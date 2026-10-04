@@ -1,3 +1,4 @@
+import { distinctMailboxes, firstAddress, parseAddressList, type Mailbox } from "./address-list.js";
 import { singleLine } from "./mime-headers.js";
 import { stripHtml } from "./response.js";
 
@@ -41,17 +42,88 @@ export interface OriginalMessage {
   references?: string;
   plain?: string;
   html?: string;
+  /** Raw `Reply-To`, `To` and `Cc` header values, and whether the account
+   * itself sent the message. What a reply is addressed from (SCRUM-368). */
+  replyTo?: string;
+  to?: string;
+  cc?: string;
+  selfSent?: boolean;
 }
 
-/** The bare address out of a `From` header. Returns the input unchanged when
- * there is no angle-addr, which is a legal `From`. */
+/** The most addresses one reply may carry. The list comes out of a message
+ * somebody else wrote, so its length is theirs to choose until this says no. */
+export const MAX_REPLY_RECIPIENTS = 100;
+
+/** Whether the reply left out the person the original says it is from.
+ * True when a Reply-To redirected it, with or without reply all: correct
+ * mail behaviour, and also the way a message with a familiar sender has its
+ * answers sent to someone else, so the caller is told. */
+export function replyRedirected(
+  original: Pick<OriginalMessage, "from" | "selfSent">,
+  recipients: Mailbox[]
+): boolean {
+  if (original.selfSent) return false;
+  const sender = firstAddress(original.from).toLowerCase();
+  return !recipients.some((m) => m.address.toLowerCase() === sender);
+}
+
+/** Who a reply goes to, the way Gmail's own Reply and Reply all decide it.
+ *
+ * REPLY: the original's Reply-To when it has one, otherwise its From. When
+ * the account itself sent the original, replying to "the sender" would mail
+ * yourself, so the reply goes to the people the original was sent to.
+ *
+ * REPLY ALL adds the rest of the conversation: the original's other To
+ * recipients join To and its Cc stays Cc, with the account's own addresses
+ * taken out and nobody listed twice.
+ *
+ * Every value here comes out of a message somebody else wrote, so the headers
+ * are parsed (address-list.ts), not split, and an entry without a usable
+ * address is dropped. Throws when nothing is left to address: a reply with no
+ * recipient is refused by Gmail with a message that explains nothing. */
+export function replyRecipients(
+  original: Pick<OriginalMessage, "from" | "replyTo" | "to" | "cc" | "selfSent">,
+  opts: { replyAll?: boolean; ownAddresses?: string[] } = {}
+): { to: Mailbox[]; cc: Mailbox[] } {
+  const originalTo = parseAddressList(original.to);
+  const replyTo = parseAddressList(original.replyTo);
+  const primary = original.selfSent
+    ? originalTo
+    : replyTo.length > 0
+      ? replyTo
+      : parseAddressList(original.from);
+
+  let to = distinctMailboxes(primary);
+  let cc: Mailbox[] = [];
+  if (opts.replyAll) {
+    const own = opts.ownAddresses ?? [];
+    const widened = distinctMailboxes([...primary, ...originalTo], own);
+    // Taking the account's own addresses out must not empty the reply: a
+    // note sent only to yourself is still answered to yourself.
+    if (widened.length > 0) to = widened;
+    cc = distinctMailboxes(parseAddressList(original.cc), [...own, ...to.map((m) => m.address)]);
+  }
+  if (to.length + cc.length > MAX_REPLY_RECIPIENTS) {
+    throw new Error(
+      `This reply would go to ${to.length + cc.length} addresses; one reply takes at most ${MAX_REPLY_RECIPIENTS}. ` +
+        (opts.replyAll ? "Reply without reply_all, or send a new message to the people you mean." : "Send a new message to the people you mean.")
+    );
+  }
+  if (to.length === 0) {
+    throw new Error(
+      original.selfSent
+        ? "This message was sent from this account and names no recipient in To, so there is nobody to reply to."
+        : "This message has no usable From or Reply-To address, so there is nobody to reply to."
+    );
+  }
+  return { to, cc };
+}
+
+/** The bare address out of a `From` header: the first mailbox it names.
+ * A header with no usable address comes back folded onto one line, so the
+ * attribution line still says something. */
 export function addressOnly(from: string): string {
-  const safe = singleLine(from);
-  const open = safe.lastIndexOf("<");
-  if (open === -1) return safe;
-  const close = safe.indexOf(">", open);
-  if (close === -1) return safe;
-  return safe.slice(open + 1, close).trim();
+  return firstAddress(from) || singleLine(from);
 }
 
 export function replySubject(subject: string): string {

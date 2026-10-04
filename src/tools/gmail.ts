@@ -7,11 +7,13 @@ import {
   applySignature,
   plainToHtml,
   lookupSignature,
+  ownAddresses,
   suppressionRequested,
   type SignatureState,
 } from "./gmail-signature.js";
 import { DRAFT_SIGN_MAX_CHARS, draftFromHeader, signDraftRaw } from "./gmail-draft-send.js";
 import { encodeAddressHeader, encodeHeaderValue, renderHeaders } from "./mime-headers.js";
+import { addressLine } from "./address-list.js";
 export { renderHeaders };
 import { buildMessage } from "../mime/build.js";
 import {
@@ -26,7 +28,6 @@ import {
   type Resolved,
 } from "../attachments/resolve.js";
 import {
-  addressOnly,
   derivePlain,
   escapeHtml,
   buildReplyBodies,
@@ -35,6 +36,9 @@ import {
   forwardHtmlBlock,
   forwardPlainBlock,
   forwardSubject,
+  addressOnly,
+  replyRecipients,
+  replyRedirected,
   replySubject,
   threadHeaders,
   type OriginalMessage,
@@ -50,7 +54,7 @@ const emailFields = {
   body: {
     type: "string",
     description:
-      "Plain-text email body. When html_body is also given, this becomes the text/plain alternative part shown by plain-text clients.",
+      "Plain-text email body. When html_body is also given, this becomes the text/plain alternative part shown by plain-text clients. One of body or html_body is required.",
   },
   html_body: {
     type: "string",
@@ -159,7 +163,9 @@ export const gmailTools: ToolDef[] = [
   },
   {
     name: "gmail_reply",
-    description: "Reply to an existing email thread in Gmail." + SIGNATURE_NOTE,
+    description:
+      "Reply to an existing email in its thread. The reply is addressed the way Gmail's own Reply does it: to the original's Reply-To when it has one, otherwise to its sender; when you sent the original yourself, to the people it was sent to. Pass reply_all: true to include everyone else on the original as well. The response reports the To and Cc the reply went to; when a Reply-To meant the original's sender was not among them, it also carries reply_to_used: true and original_from, so check to against who you meant to answer. A body is required: pass body or html_body." +
+      SIGNATURE_NOTE,
     inputSchema: {
       type: "object",
       properties: {
@@ -167,11 +173,19 @@ export const gmailTools: ToolDef[] = [
           type: "string",
           description: "The Gmail message ID to reply to",
         },
-        body: { type: "string", description: "Reply body text (plain)" },
+        body: {
+          type: "string",
+          description: "Reply body text (plain). One of body or html_body is required.",
+        },
         html_body: {
           type: "string",
           description:
-            "HTML reply body. Sent as text/html with no plain-text alternative part (this path hands quoting and threading to a single-part composer); the original message is quoted with Gmail styling. Provide body or html_body, not both.",
+            "HTML reply body. The reply goes out with both an HTML part and a plain-text part derived from it, and the original message is quoted beneath with Gmail styling. Provide body or html_body, not both; one of them is required.",
+        },
+        reply_all: {
+          type: "boolean",
+          description:
+            "Default false: the reply goes to one party, the original's Reply-To or sender (or, for a message you sent, its recipients). Set true to reply to everyone: the original's other To recipients are added to To and its Cc recipients to Cc, without your own addresses.",
         },
         ...attachmentsField,
         ...signatureField,
@@ -203,7 +217,7 @@ export const gmailTools: ToolDef[] = [
         html_body: {
           type: "string",
           description:
-            "Optional HTML note included above the forwarded message. Sent as text/html with no plain-text alternative part; the forwarded block is formatted with Gmail styling. Provide body or html_body, not both.",
+            "Optional HTML note included above the forwarded message. The forward goes out with both an HTML part and a plain-text part, and the forwarded block is formatted with Gmail styling. Provide body or html_body, not both.",
         },
         ...attachmentsField,
         include_original_attachments: {
@@ -360,7 +374,7 @@ export const gmailTools: ToolDef[] = [
   {
     name: "gmail_mark_read",
     description:
-      "Mark one or more Gmail messages as read by removing the UNREAD label. Can also add or remove other labels. Pass message_id for a single message (returns the modified message) or message_ids for a batch (up to 1000, single API call via users.messages.batchModify).",
+      "Mark one or more Gmail messages as read by removing the UNREAD label. With add_labels or remove_labels given, it applies exactly those and nothing else, so add_labels alone does not mark anything read and add_labels [\"UNREAD\"] marks unread. Pass message_id for a single message (returns the modified message) or message_ids for a batch (up to 1000, single API call via users.messages.batchModify).",
     inputSchema: {
       type: "object",
       properties: {
@@ -1029,9 +1043,14 @@ async function modifyMessageLabels(
 
 /** Every send tool's response carries the signature outcome, so a caller can
  * tell an applied signature from a missing one from a failed lookup. */
-function sentResponse(data: unknown, signature: SignatureState, report?: ReportEntry[]) {
+function sentResponse(
+  data: unknown,
+  signature: SignatureState,
+  report?: ReportEntry[],
+  extra: Record<string, unknown> = {}
+) {
   const base = data && typeof data === "object" ? (data as Record<string, unknown>) : {};
-  return jsonResponse(withReport({ ...base, signature }, report));
+  return jsonResponse(withReport({ ...base, signature, ...extra }, report));
 }
 
 /** Sign the body for the CLI helpers that have ONE body slot (+reply,
@@ -1202,6 +1221,11 @@ async function fetchOriginal(
     parts: filenameParts(messageId, message.payload),
     original: {
       from: header("From"),
+      replyTo: header("Reply-To") || undefined,
+      to: header("To") || undefined,
+      cc: header("Cc") || undefined,
+      // Gmail labels a message SENT only when this account sent it.
+      selfSent: message.labelIds?.includes("SENT") ?? false,
       date: header("Date"),
       subject: header("Subject"),
       messageId: header("Message-ID") || header("Message-Id"),
@@ -1287,6 +1311,16 @@ export async function handleGmail(
         signed = await signSingleSlotBody(client, toolName, args, { requireBody: true }, resolved.links);
       }
       const { original, threadId } = fetched;
+      // Reply all leaves the account's own addresses out, which takes the
+      // account's send-as list. Read only then: a plain reply needs no
+      // address but the ones on the original.
+      const replyAll = args.reply_all === true;
+      const recipients = replyRecipients(original, {
+        replyAll,
+        ownAddresses: replyAll ? await ownAddresses(client) : [],
+      });
+      const to = addressLine(recipients.to);
+      const cc = addressLine(recipients.cc);
       const plainBody =
         signed.body ??
         derivePlain(signed.unsignedHtml ?? (args.html_body as string) ?? "");
@@ -1296,13 +1330,24 @@ export async function handleGmail(
         signed.html ?? plainToHtml(plainBody)
       );
       const headers = [
-        `To: ${encodeAddressHeader(addressOnly(original.from))}`,
+        `To: ${encodeAddressHeader(to)}`,
+        ...(cc ? [`Cc: ${encodeAddressHeader(cc)}`] : []),
         `Subject: ${encodeHeaderValue(replySubject(original.subject))}`,
         ...threadHeaders(original),
       ];
+      // Where it went is part of the answer: a Reply-To can name someone
+      // other than the sender, and the caller should see that it did.
+      // A reply that did not reach the original's sender says so, and names
+      // the sender it left out.
+      const redirected = replyRedirected(original, [...recipients.to, ...recipients.cc]);
+      const sentTo = {
+        to,
+        ...(cc ? { cc } : {}),
+        ...(redirected ? { reply_to_used: true, original_from: addressOnly(original.from) } : {}),
+      };
       if (resolved) {
         const data = await deliver(client, { kind: "send", threadId }, headers, { plain: bodies.plain, html: bodies.html }, resolved.files);
-        return sentResponse(data, signed.state, resolved.report);
+        return sentResponse(data, signed.state, resolved.report, sentTo);
       }
       const result = await client.api("gmail", "users.messages", "send", {
         params: { userId: "me" },
@@ -1311,7 +1356,7 @@ export async function handleGmail(
           ...(threadId ? { threadId } : {}),
         },
       });
-      return sentResponse(result.data, signed.state);
+      return sentResponse(result.data, signed.state, undefined, sentTo);
     }
 
     case "gmail_forward": {
@@ -1481,8 +1526,13 @@ export async function handleGmail(
       const removeLabels = args.remove_labels as string[] | undefined;
       const body: Record<string, unknown> = {};
       if (addLabels?.length) body.addLabelIds = addLabels;
-      // The read-state tool's default: with nothing specified, mark read.
-      body.removeLabelIds = removeLabels?.length ? removeLabels : ["UNREAD"];
+      if (removeLabels?.length) body.removeLabelIds = removeLabels;
+      // The read-state tool's default, and ONLY a default (SCRUM-368): with
+      // no label named at all, mark read. A caller who names labels gets
+      // exactly those. The default used to apply whenever remove_labels was
+      // empty, so add_labels alone also marked the mail read, and
+      // add_labels ["UNREAD"] added and removed UNREAD in one request.
+      if (!addLabels?.length && !removeLabels?.length) body.removeLabelIds = ["UNREAD"];
       return modifyMessageLabels(client, args, body);
     }
 
