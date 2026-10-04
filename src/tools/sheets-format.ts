@@ -349,6 +349,16 @@ async function formatTable(client: GwsClient, args: Record<string, unknown>) {
   // every other request below is index-stable, so putting the deletes anywhere
   // but the front would silently move the targets of everything that follows.
   if (args.trim_grid === true) {
+    // Trimming deletes everything outside the range, so the range must mean
+    // one thing. A bare word that is both a tab and a cell reference does
+    // not, and is refused rather than read either way (SCRUM-369).
+    if (resolve.ambiguous(args.range as string)) {
+      throw new Error(
+        `sheets_format_table cannot trim "${args.range}": that is both the name of a tab and a cell ` +
+          `reference, and trimming deletes everything outside the range. Name the tab and the block, ` +
+          `for example "'${args.range}'!A1:E60".`
+      );
+    }
     if (grid.endColumnIndex === undefined || grid.endRowIndex === undefined) {
       throw new Error(
         `sheets_format_table cannot trim "${args.range}": trimming deletes ` +

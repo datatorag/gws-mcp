@@ -29,6 +29,17 @@ const TABLE = {
   },
 };
 
+/** The tab list every call that names a tab reads first (SCRUM-369). */
+const TABS = {
+  data: {
+    sheets: [
+      { properties: { sheetId: 11, title: "First" } },
+      { properties: { sheetId: 12, title: "Tasks" } },
+      { properties: { sheetId: 13, title: "Tab" } },
+    ],
+  },
+};
+
 describe("sheets_query (SCRUM-261)", () => {
   it("is a read tool, registered and dispatched like the rest", () => {
     const tool = sheetsQueryTools.find((t) => t.name === "sheets_query");
@@ -39,7 +50,7 @@ describe("sheets_query (SCRUM-261)", () => {
   });
 
   it("select with where and order by returns the subset in the order the endpoint gave, header first", async () => {
-    const { client, calls } = fakeClient([{ text: wrap(TABLE) }]);
+    const { client, calls } = fakeClient([TABS, { text: wrap(TABLE) }]);
     const result = payload(
       await handleSheetsQuery(client, "sheets_query", {
         spreadsheet_id: "s",
@@ -47,8 +58,9 @@ describe("sheets_query (SCRUM-261)", () => {
         query: "select A, C, F where C > 0 order by C desc",
       })
     );
-    expect(calls).toHaveLength(1);
-    const url = new URL(calls[0].url as string);
+    // The tab list, then the one query.
+    expect(calls).toHaveLength(2);
+    const url = new URL(calls[1].url as string);
     expect(url.origin + url.pathname).toBe("https://docs.google.com/spreadsheets/d/s/gviz/tq");
     expect(url.searchParams.get("tq")).toBe("select A, C, F where C > 0 order by C desc");
     expect(url.searchParams.get("tqx")).toBe("out:json");
@@ -97,6 +109,7 @@ describe("sheets_query (SCRUM-261)", () => {
 
   it("a query naming a column outside the range is a structured error naming the column", async () => {
     const { client } = fakeClient([
+      TABS,
       {
         text: wrap({
           status: "error",
@@ -166,7 +179,7 @@ const noColumn = (name: string) => ({
 
 describe("sheets_query Col1-style names (SCRUM-268)", () => {
   it("maps Col<n> to the sheet letter counted from the range's first column, sends it, and echoes it", async () => {
-    const { client, calls } = fakeClient([OK]);
+    const { client, calls } = fakeClient([TABS, OK]);
     const result = payload(
       await handleSheetsQuery(client, "sheets_query", {
         spreadsheet_id: "s",
@@ -174,7 +187,7 @@ describe("sheets_query Col1-style names (SCRUM-268)", () => {
         query: "select Col1, Col3 where Col2 = 'x'",
       })
     );
-    const url = new URL(calls[0].url as string);
+    const url = new URL(calls[1].url as string);
     expect(url.searchParams.get("tq")).toBe("select B, D where C = 'x'");
     expect(url.searchParams.get("range")).toBe("B1:F9");
     expect(result.query).toBe("select B, D where C = 'x'");
@@ -210,11 +223,12 @@ describe("sheets_query Col1-style names (SCRUM-268)", () => {
   });
 
   it("refuses Col0, naming the range's first column", async () => {
-    const { client, calls } = fakeClient([]);
+    const { client, calls } = fakeClient([TABS]);
     await expect(
       handleSheetsQuery(client, "sheets_query", { spreadsheet_id: "s", range: "Tab!C1:F9", query: "select Col0" })
     ).rejects.toThrow(/Col0 names no column; Col1 is the first column of the range, C/);
-    expect(calls).toHaveLength(0);
+    // The tab was looked up; the query itself was never sent.
+    expect(calls.some((c) => "url" in c)).toBe(false);
   });
 
   it("a real letter outside the range keeps the existing message", async () => {

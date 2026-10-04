@@ -1,6 +1,7 @@
 import type { GwsClient } from "../gws-client.js";
 import { READ, ToolDef } from "./annotations.js";
 import { jsonResponse } from "./response.js";
+import { listTabs, quoteTabForRange, resolveRange, splitRange as splitA1, tabTitles } from "./sheets-grid.js";
 
 /**
  * sheets_query (SCRUM-261): the Google Visualization query language over a
@@ -31,7 +32,7 @@ export const sheetsQueryTools: ToolDef[] = [
   {
     name: "sheets_query",
     description:
-      "Run a query in the Google Sheets QUERY() language over a spreadsheet range and get back only the matching rows, in ONE call. Use this instead of reading a whole tab and filtering the values yourself: select A, D where I = 'open' order by A desc limit 20 returns the twenty rows you wanted and nothing else. The language supports select, where, group by, pivot, order by, limit, offset, label and format, with count, sum, avg, min and max. Columns are addressed by their SHEET letter (A, B, C), the same letter the column has in the tab, not its position inside the range; Col1-style names are also accepted and mapped to the range's columns in order (on Tab!C1:F500, Col1 is C). Text values are compared with quotes: where B = 'high' or where B contains 'urgent'. Read-only: nothing in the spreadsheet changes. The result carries the header the query produced, the rows, the row count and the echoed query; an empty match is an empty rows array.",
+      "Run a query in the Google Sheets QUERY() language over a spreadsheet range and get back only the matching rows, in ONE call. Use this instead of reading a whole tab and filtering the values yourself: select A, D where I = 'open' order by A desc limit 20 returns the twenty rows you wanted and nothing else. The language supports select, where, group by, pivot, order by, limit, offset, label and format, with count, sum, avg, min and max. Columns are addressed by their SHEET letter (A, B, C), the same letter the column has in the tab, not its position inside the range; Col1-style names are also accepted and mapped to the range's columns in order (on Tab!C1:F500, Col1 is C). Text values are compared with quotes: where B = 'high' or where B contains 'urgent'. A column that mixes numbers and text is read as whichever type most of its cells hold, and the cells of the other type come back empty: that is the query endpoint's own rule and cannot be turned off, so read such a column with sheets_read or sheets_find_rows instead. Read-only: nothing in the spreadsheet changes. The result carries the header the query produced, the rows, the row count and the echoed query; an empty match is an empty rows array.",
     inputSchema: {
       type: "object",
       properties: {
@@ -47,7 +48,7 @@ export const sheetsQueryTools: ToolDef[] = [
         range: {
           type: "string",
           description:
-            'What the query runs over: a tab name on its own queries that whole tab (the simplest correct call), or A1 notation naming a real tab, e.g. "TabName!A1:F500". Omitted, the first tab is queried.',
+            'What the query runs over: a tab name on its own queries that whole tab (the simplest correct call), or A1 notation naming a real tab, e.g. "TabName!A1:F500". A bare word that is the name of a tab is that tab, even when it also reads as a cell ("Q3", "Log"). A tab that does not exist is refused with the list of tabs. Omitted, the first tab is queried.',
         },
         has_header_row: {
           type: "boolean",
@@ -70,19 +71,40 @@ type GvizResponse = {
   table?: GvizTable;
 };
 
-/** Splits "Tab!A1:D9" into the tab and the cell block; a bare name is a tab
- * with no block, and a bare block is the first tab. */
+/** Splits "Tab!A1:D9" into the tab and the cell block, from the text alone.
+ * By the time a range reaches this it has been resolved against the
+ * spreadsheet's real tabs (`resolveTarget`), so a tab is always written with
+ * its quotes and the split is exact. */
 function splitRange(range: string | undefined): { sheet?: string; block?: string } {
   if (!range || range.trim() === "") return {};
-  const s = range.trim();
-  const bang = s.lastIndexOf("!");
-  if (bang === -1) {
-    // A bare A1 block has a digit or a colon; anything else is a tab name.
-    return /^[A-Za-z]{1,3}[0-9]*(:[A-Za-z]{1,3}[0-9]*)?$/.test(s) ? { block: s } : { sheet: s };
-  }
-  const sheet = s.slice(0, bang).replace(/^'(.*)'$/, "$1");
-  const block = s.slice(bang + 1);
-  return { sheet, ...(block ? { block } : {}) };
+  const { tab, cells } = splitA1(range.trim());
+  return { ...(tab !== undefined ? { sheet: tab } : {}), ...(cells ? { block: cells } : {}) };
+}
+
+/** The range the query will really run over, checked against the tabs the
+ * spreadsheet has (SCRUM-369).
+ *
+ * The query endpoint does not refuse a tab it cannot find: it answers with
+ * the FIRST tab's rows and no error. So a misspelt tab, a tab whose quotes
+ * were not un-doubled, or a tab named like a cell ("Q3", "Log", "CRM") came
+ * back as a confident table from the wrong tab. The tab list is read first
+ * and the tab is named to the endpoint by its real title, or the call is
+ * refused with the list.
+ *
+ * A bare block that holds a colon ("A1:D9") can only be cells on the first
+ * tab and costs no lookup. */
+async function resolveTarget(
+  client: GwsClient,
+  spreadsheetId: string,
+  range: string | undefined
+): Promise<string | undefined> {
+  const asked = range?.trim() ?? "";
+  if (asked === "") return undefined;
+  if (!asked.includes("!") && !asked.startsWith("'") && asked.includes(":")) return asked;
+  const titles = tabTitles(await listTabs(client, spreadsheetId));
+  const { tab, cells } = resolveRange(asked, titles);
+  if (tab === undefined) return cells;
+  return cells ? `${quoteTabForRange(tab)}!${cells}` : quoteTabForRange(tab);
 }
 
 const letterToIndex = (letters: string) =>
@@ -111,7 +133,7 @@ function blockColumns(block: string | undefined): { first: number; last?: number
  * the sheet letter of the range's n-th column. Throws before any request for
  * Col0, a column past the range's end, or a block it cannot count. Exported
  * for the tests. */
-export function rewriteColumnNames(query: string, range: string | undefined): string {
+export function rewriteColumnNames(query: string, range: string | undefined, shown: string | undefined = range): string {
   // Odd parts are string literals, which are left exactly as written.
   const parts = query.split(/('[^']*'|"[^"]*")/);
   const colName = /\bcol(\d+)\b/gi;
@@ -124,7 +146,7 @@ export function rewriteColumnNames(query: string, range: string | undefined): st
         : part.replace(colName, (name: string, digits: string) => {
             if (!cols) {
               throw new Error(
-                `sheets_query: cannot map ${name} onto the range ${range}; name the column by its sheet letter instead.`
+                `sheets_query: cannot map ${name} onto the range ${shown}; name the column by its sheet letter instead.`
               );
             }
             const n = Number(digits);
@@ -136,7 +158,7 @@ export function rewriteColumnNames(query: string, range: string | undefined): st
             const target = cols.first + n - 1;
             if (cols.last !== undefined && target > cols.last) {
               throw new Error(
-                `sheets_query: ${name} would be column ${indexToLetter(target)}, past the last column ${indexToLetter(cols.last)} of the range ${range}.`
+                `sheets_query: ${name} would be column ${indexToLetter(target)}, past the last column ${indexToLetter(cols.last)} of the range ${shown}.`
               );
             }
             return indexToLetter(target);
@@ -190,9 +212,12 @@ export async function runSheetsQuery(client: GwsClient, args: Record<string, unk
   }
   const asWritten = typeof args.query === "string" ? args.query.trim() : "";
   if (asWritten === "") throw new Error("sheets_query: query must not be blank.");
-  const range = typeof args.range === "string" ? args.range : undefined;
   const hasHeader = args.has_header_row !== false;
-  const query = rewriteColumnNames(asWritten, range);
+  // `asked` is what the caller wrote and is what error messages quote back;
+  // `range` is the same thing with its tab confirmed and written exactly.
+  const asked = typeof args.range === "string" ? args.range : undefined;
+  const range = await resolveTarget(client, spreadsheetId, asked);
+  const query = rewriteColumnNames(asWritten, range, asked);
 
   const url = buildQueryUrl(spreadsheetId, query, range, hasHeader);
   const { status, text } = await client.fetchText(url);
@@ -217,7 +242,7 @@ export async function runSheetsQuery(client: GwsClient, args: Record<string, unk
     }
     if (missing) {
       throw new Error(
-        `sheets_query: the query names column ${missing}, which is outside the range${range ? ` ${range}` : ""}. Columns are sheet letters; check the range covers ${missing}.`
+        `sheets_query: the query names column ${missing}, which is outside the range${asked ? ` ${asked}` : ""}. Columns are sheet letters; check the range covers ${missing}.`
       );
     }
     throw new Error(`sheets_query: ${first?.reason ?? "error"}: ${detail}`);

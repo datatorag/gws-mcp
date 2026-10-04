@@ -35,17 +35,31 @@ export interface GridRange extends GridBounds {
 
 /* ------------------------------ A1 parsing ------------------------------- */
 
+/** A range whose tab is written in quotes: `'Tab name'!cells`. The name may
+ * hold anything, a "!" included, and a doubled single quote is one quote. The
+ * "!" that ends the tab is the one right after the closing quote, never the
+ * first one in the string (SCRUM-369: `'Wins!'!C10:F50` used to be cut at the
+ * "!" inside the name, and everything read from the cell part was wrong). */
+const QUOTED_TAB = /^'((?:[^']|'')*)'!([\s\S]*)$/;
+
 /** The sheet-name prefix of an A1 range ("'Q3 Data'!A1:B2" → "Q3 Data",
  * "Sheet1!A:A" → "Sheet1"), or undefined when the range has no tab prefix.
  * A doubled single quote inside a quoted name is the A1 escape for one. */
 export function tabNameFromRange(range: string): string | undefined {
-  const quoted = /^'((?:[^']|'')*)'!/.exec(range);
-  if (quoted) return quoted[1].replace(/''/g, "'");
+  return tabAndCells(range)?.tab;
+}
+
+/** The tab and the cell part of a range that names its tab with a "!", or
+ * undefined when it names none. An unquoted name ends at the LAST "!": cells
+ * never hold one, so anything before it is the name. */
+function tabAndCells(range: string): { tab: string; cells: string } | undefined {
+  const quoted = QUOTED_TAB.exec(range);
+  if (quoted) return { tab: quoted[1].replace(/''/g, "'"), cells: quoted[2] };
   // A leading quote that didn't match is an unterminated/garbled quoted
   // prefix — not a bare tab name for the fallback below to mangle.
   if (range.startsWith("'")) return undefined;
-  const bang = range.indexOf("!");
-  return bang > 0 ? range.slice(0, bang) : undefined;
+  const bang = range.lastIndexOf("!");
+  return bang > 0 ? { tab: range.slice(0, bang), cells: range.slice(bang + 1) } : undefined;
 }
 
 /** A tab title as it must appear inside an A1 range: quoted, with internal
@@ -152,21 +166,19 @@ export function a1ToGridBounds(cells: string): GridBounds {
   };
 }
 
-/** Split a range into its tab title and its cell part.
+/** Split a range into its tab title and its cell part, from the text alone.
  *
  * A string with no "!" is ambiguous: "A1:D10" is a range and "Inventory" is a
- * tab. It is resolved the way Sheets itself resolves it, by whether the string
- * is a syntactically valid A1 range — and the three-letter column cap is what
- * makes "Inventory" fail that test. A tab whose name genuinely looks like a
- * cell reference ("Q3") must be written with an explicit "!" to be addressed
- * as a tab; there is no way to tell the two apart otherwise, and guessing
- * silently is worse than a rule that can be stated. */
+ * tab. Without the spreadsheet's tab list the only test available is whether
+ * the string is a syntactically valid A1 range, and the three-letter column
+ * cap is what makes "Inventory" fail it. That test reads a tab called "Q3",
+ * "Log" or "CRM" as cells, so every caller that HAS the tab list resolves
+ * through `resolveRange` instead, where a name that is a tab is a tab. This
+ * form remains for reading a range the API echoed back, which always carries
+ * its tab. */
 export function splitRange(range: string): { tab?: string; cells: string } {
-  const tab = tabNameFromRange(range);
-  if (tab !== undefined) {
-    const bang = range.indexOf("!");
-    return { tab, cells: range.slice(bang + 1) };
-  }
+  const named = tabAndCells(range);
+  if (named) return named;
   const bare = range.trim();
   if (bare.startsWith("'") && bare.endsWith("'") && bare.length > 1) {
     return { tab: bare.slice(1, -1).replace(/''/g, "'"), cells: "" };
@@ -178,6 +190,58 @@ export function splitRange(range: string): { tab?: string; cells: string } {
     return { cells: bare };
   }
   return { tab: bare, cells: "" };
+}
+
+/** The tab a caller's title names, matched as Sheets matches it: exactly, or
+ * failing that without regard to case, which is how Sheets treats tab titles
+ * (it will not let two differ by case alone). */
+export function matchTab(title: string, titles: string[]): string | undefined {
+  if (titles.includes(title)) return title;
+  const lower = title.toLowerCase();
+  return titles.find((t) => t.toLowerCase() === lower);
+}
+
+export interface ResolvedRange {
+  /** The tab's real title, or undefined for the first tab. */
+  tab?: string;
+  cells: string;
+  /** True when the caller wrote a bare word that is both a real tab and a
+   * valid cell reference ("Q3"). It is read as the tab; a caller about to do
+   * something destructive should refuse rather than rely on that reading. */
+  ambiguous: boolean;
+}
+
+/** Split a range against the spreadsheet's REAL tab list (SCRUM-369).
+ *
+ * A NAME THAT IS A TAB IS A TAB. A bare "Q3", "Log", "CRM" or "Jan" is a
+ * valid cell or column reference as text, and used to be applied to the
+ * first tab with no error while the tab of that name sat untouched. Checked
+ * against the tabs that exist, the question has an answer: if a tab has that
+ * name, the caller means the tab. Only a bare word that is no tab is read as
+ * cells on the first tab.
+ *
+ * A tab that is named but does not exist throws with the tab list, as every
+ * other Sheets tool does. */
+export function resolveRange(range: string, titles: string[]): ResolvedRange {
+  const named = tabAndCells(range);
+  if (named) {
+    const tab = matchTab(named.tab, titles);
+    if (tab === undefined) throw noSuchTabError(named.tab, titles);
+    return { tab, cells: named.cells, ambiguous: false };
+  }
+  const bare = range.trim();
+  const unquoted =
+    bare.startsWith("'") && bare.endsWith("'") && bare.length > 1 ? bare.slice(1, -1).replace(/''/g, "'") : undefined;
+  if (unquoted !== undefined) {
+    const tab = matchTab(unquoted, titles);
+    if (tab === undefined) throw noSuchTabError(unquoted, titles);
+    return { tab, cells: "", ambiguous: false };
+  }
+  const looksLikeCells = bare === "" || bare.includes(":") || A1_CELLS.test(bare);
+  const tab = bare === "" ? undefined : matchTab(bare, titles);
+  if (tab !== undefined) return { tab, cells: "", ambiguous: looksLikeCells };
+  if (looksLikeCells) return { cells: bare, ambiguous: false };
+  throw noSuchTabError(bare, titles);
 }
 
 /* --------------------------- tabs and sheetIds ---------------------------- */
@@ -283,6 +347,9 @@ export interface GridSize {
 
 export interface RangeResolver {
   (range: string): GridRange;
+  /** True when the range is a bare word that is both a tab and a valid cell
+   * reference; see `ResolvedRange.ambiguous`. */
+  ambiguous(range: string): boolean;
   /** The real row and column count of a tab, for callers that need to bound an
    * open-ended range against the grid's actual extent. Undefined when the API
    * did not report one (a non-grid sheet such as a chart). */
@@ -314,7 +381,7 @@ export async function gridRangeResolver(
   const firstSheetId = props[0]?.sheetId;
 
   const resolve = (range: string): GridRange => {
-    const { tab, cells } = splitRange(range);
+    const { tab, cells } = resolveRange(range, titles);
     let sheetId: number | undefined;
     if (tab === undefined) {
       sheetId = firstSheetId;
@@ -337,7 +404,9 @@ export async function gridRangeResolver(
     return { rowCount: g.rowCount, columnCount: g.columnCount };
   };
 
-  return Object.assign(resolve, { gridSize });
+  const ambiguous = (range: string): boolean => resolveRange(range, titles).ambiguous;
+
+  return Object.assign(resolve, { gridSize, ambiguous });
 }
 
 /* ------------------------------ formatting -------------------------------- */
