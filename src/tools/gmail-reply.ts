@@ -1,4 +1,4 @@
-import { distinctMailboxes, firstAddress, parseAddressList, type Mailbox } from "./address-list.js";
+import { addressKey, distinctMailboxes, firstAddress, parseAddressList, type Mailbox } from "./address-list.js";
 import { singleLine } from "./mime-headers.js";
 import { stripHtml } from "./response.js";
 
@@ -63,8 +63,56 @@ export function replyRedirected(
   recipients: Mailbox[]
 ): boolean {
   if (original.selfSent) return false;
-  const sender = firstAddress(original.from).toLowerCase();
-  return !recipients.some((m) => m.address.toLowerCase() === sender);
+  const sender = addressKey(firstAddress(original.from));
+  return !recipients.some((m) => addressKey(m.address) === sender);
+}
+
+/** Hold a reply to the recipients the caller named (`expected_to`).
+ *
+ * Who a reply goes to is decided by headers the SENDER of the original wrote:
+ * a Reply-To redirects it, and under reply all so do that message's To and
+ * Cc. A caller that knows who it means to answer says so, and the reply is
+ * refused before anything is sent unless it would go to exactly those
+ * addresses.
+ *
+ * EXACTLY, and counting everyone who would receive it: the To and, under
+ * reply all, the Cc. One address the caller did not name is a refusal, and
+ * so is a named address the reply would not reach, since a caller who named
+ * three people and reaches two has not sent what it meant to. Order and case
+ * do not matter. With several addresses, name them all.
+ *
+ * Throws; returns nothing. The message names both sets and the difference,
+ * so the caller can see the redirect it was protected from. */
+export function assertExpectedRecipients(
+  recipients: { to: Mailbox[]; cc: Mailbox[] },
+  expectedTo: unknown
+): void {
+  if (expectedTo === undefined || expectedTo === null) return;
+  if (typeof expectedTo !== "string") {
+    throw new Error("gmail_reply: expected_to must be a string of one or more email addresses, comma separated.");
+  }
+  const expected = distinctMailboxes(parseAddressList(expectedTo)).map((m) => m.address);
+  if (expected.length === 0) {
+    throw new Error(
+      "gmail_reply: expected_to holds no email address. Name the address or addresses the reply should go to, or leave it out."
+    );
+  }
+  const actual = [...recipients.to, ...recipients.cc].map((m) => m.address);
+  const keys = (list: string[]) => new Set(list.map(addressKey));
+  const expectedSet = keys(expected);
+  const actualSet = keys(actual);
+  const unexpected = actual.filter((a) => !expectedSet.has(addressKey(a)));
+  const unreached = expected.filter((a) => !actualSet.has(addressKey(a)));
+  if (unexpected.length === 0 && unreached.length === 0) return;
+  const cc = recipients.cc.length > 0 ? `, Cc: ${recipients.cc.map((m) => m.address).join(", ")}` : "";
+  throw new Error(
+    "gmail_reply: nothing was sent. This reply would go to " +
+      `To: ${recipients.to.map((m) => m.address).join(", ")}${cc}, ` +
+      `which is not what expected_to names (${expected.join(", ")}).` +
+      (unexpected.length > 0 ? ` Not expected: ${unexpected.join(", ")}.` : "") +
+      (unreached.length > 0 ? ` Named but not addressed: ${unreached.join(", ")}.` : "") +
+      " The recipients come from the original message's Reply-To, From, To and Cc. If they are right, call again with expected_to listing all of them or without it; if they are not, send a new message to the people you mean."
+  );
 }
 
 /** Who a reply goes to, the way Gmail's own Reply and Reply all decide it.

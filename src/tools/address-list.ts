@@ -141,13 +141,21 @@ export function addressLine(mailboxes: Mailbox[]): string {
   return mailboxes.map((m) => m.address).join(", ");
 }
 
+/** An address as it is compared: ASCII letters lowered and nothing else.
+ * `toLowerCase` also folds letters outside ASCII onto ASCII ones (the Kelvin
+ * sign U+212A becomes "k"), which would make two different addresses compare
+ * equal in the one place equality decides who receives mail. */
+export function addressKey(address: string): string {
+  return address.replace(/[A-Z]/g, (c) => c.toLowerCase());
+}
+
 /** The same mailboxes with later repeats of an address removed, and with any
  * address in `exclude` removed. Addresses compare case-insensitively. */
 export function distinctMailboxes(mailboxes: Mailbox[], exclude: Iterable<string> = []): Mailbox[] {
-  const seen = new Set<string>([...exclude].map((a) => a.toLowerCase()));
+  const seen = new Set<string>([...exclude].map(addressKey));
   const out: Mailbox[] = [];
   for (const m of mailboxes) {
-    const key = m.address.toLowerCase();
+    const key = addressKey(m.address);
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(m);

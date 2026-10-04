@@ -37,6 +37,7 @@ import {
   forwardPlainBlock,
   forwardSubject,
   addressOnly,
+  assertExpectedRecipients,
   replyRecipients,
   replyRedirected,
   replySubject,
@@ -164,7 +165,7 @@ export const gmailTools: ToolDef[] = [
   {
     name: "gmail_reply",
     description:
-      "Reply to an existing email in its thread. The reply is addressed the way Gmail's own Reply does it: to the original's Reply-To when it has one, otherwise to its sender; when you sent the original yourself, to the people it was sent to. Pass reply_all: true to include everyone else on the original as well. The response reports the To and Cc the reply went to; when a Reply-To meant the original's sender was not among them, it also carries reply_to_used: true and original_from, so check to against who you meant to answer. A body is required: pass body or html_body." +
+      "Reply to an existing email in its thread. The reply is addressed the way Gmail's own Reply does it: to the original's Reply-To when it has one, otherwise to its sender; when you sent the original yourself, to the people it was sent to. Pass reply_all: true to include everyone else on the original as well. The response reports the To and Cc the reply went to; when a Reply-To meant the original's sender was not among them, it also carries reply_to_used: true and original_from, so check to against who you meant to answer, or pass expected_to and the reply is refused instead of sent when it would go anywhere else. A body is required: pass body or html_body." +
       SIGNATURE_NOTE,
     inputSchema: {
       type: "object",
@@ -186,6 +187,11 @@ export const gmailTools: ToolDef[] = [
           type: "boolean",
           description:
             "Default false: the reply goes to one party, the original's Reply-To or sender (or, for a message you sent, its recipients). Set true to reply to everyone: the original's other To recipients are added to To and its Cc recipients to Cc, without your own addresses.",
+        },
+        expected_to: {
+          type: "string",
+          description:
+            "Optional guard: the address or addresses, comma separated, you mean this reply to reach. The reply is refused before anything is sent unless it would go to exactly these (every To address, and every Cc address under reply_all; order and case are ignored). Use it when it matters who receives the reply: the recipients come from the original message's headers, and a Reply-To can name someone other than the sender you see.",
         },
         ...attachmentsField,
         ...signatureField,
@@ -1319,6 +1325,9 @@ export async function handleGmail(
         replyAll,
         ownAddresses: replyAll ? await ownAddresses(client) : [],
       });
+      // The caller's own statement of who this should reach, checked before
+      // anything is composed or sent.
+      assertExpectedRecipients(recipients, args.expected_to);
       const to = addressLine(recipients.to);
       const cc = addressLine(recipients.cc);
       const plainBody =

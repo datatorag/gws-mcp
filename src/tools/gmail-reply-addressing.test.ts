@@ -191,6 +191,98 @@ describe("gmail_reply: reply_all adds the rest of the conversation", () => {
   });
 });
 
+describe("gmail_reply: expected_to holds the reply to the people the caller named", () => {
+  async function refused(headers: Record<string, string>, args: Record<string, unknown>, labelIds?: string[]) {
+    const plan = [NO_SIG, original(headers, labelIds), ...(args.reply_all ? [OWN] : [])];
+    const { client, calls } = fakeClient(plan);
+    const error = await handleGmail(client, "gmail_reply", { message_id: "m1", body: "x", ...args }).then(
+      () => null,
+      (e: Error) => e
+    );
+    return { error, sent: calls.some((c) => c.method === "send") };
+  }
+
+  it("sends when the reply goes exactly where the caller said, whatever the case or the display name", async () => {
+    const r = await reply({ From: "Sender <sender@example.com>" }, { expected_to: "SENDER@example.com" });
+    expect(r.to).toBe("To: sender@example.com");
+    const named = await reply({ From: "sender@example.com" }, { expected_to: '"Sender, The" <sender@example.com>' });
+    expect(named.to).toBe("To: sender@example.com");
+  });
+
+  it("refuses, before anything is sent, a reply that a Reply-To would send elsewhere", async () => {
+    const r = await refused(
+      { From: "Boss <boss@example.com>", "Reply-To": "support@elsewhere.example" },
+      { expected_to: "boss@example.com" }
+    );
+    expect(r.sent).toBe(false);
+    expect(r.error?.message).toMatch(/nothing was sent/);
+    expect(r.error?.message).toContain("To: support@elsewhere.example");
+    expect(r.error?.message).toContain("Not expected: support@elsewhere.example.");
+    expect(r.error?.message).toContain("Named but not addressed: boss@example.com.");
+  });
+
+  it("several addresses: all of them must be named, in any order", async () => {
+    const headers = { From: "a@example.com", "Reply-To": "list@example.com, owner@example.com" };
+    const ok = await reply(headers, { expected_to: "owner@example.com, list@example.com" });
+    expect(ok.to).toBe("To: list@example.com, owner@example.com");
+    const partial = await refused(headers, { expected_to: "list@example.com" });
+    expect(partial.sent).toBe(false);
+    expect(partial.error?.message).toContain("Not expected: owner@example.com.");
+  });
+
+  it("naming someone the reply would not reach is a refusal too", async () => {
+    const r = await refused({ From: "sender@example.com" }, { expected_to: "sender@example.com, third@example.com" });
+    expect(r.sent).toBe(false);
+    expect(r.error?.message).toContain("Named but not addressed: third@example.com.");
+    expect(r.error?.message).not.toContain("Not expected:");
+  });
+
+  it("reply_all: the Cc counts, so everyone who would receive it must be named", async () => {
+    const headers = { From: "sender@example.com", To: "me@example.com, third@example.com", Cc: "cc@example.com" };
+    const ok = await reply(headers, {
+      reply_all: true,
+      expected_to: "sender@example.com, third@example.com, cc@example.com",
+    });
+    expect(ok.to).toBe("To: sender@example.com, third@example.com");
+    expect(ok.cc).toBe("Cc: cc@example.com");
+    // Naming the To alone is not enough: the Cc is a recipient the original's
+    // sender chose.
+    const toOnly = await refused(headers, { reply_all: true, expected_to: "sender@example.com, third@example.com" });
+    expect(toOnly.sent).toBe(false);
+    expect(toOnly.error?.message).toContain("Cc: cc@example.com");
+    expect(toOnly.error?.message).toContain("Not expected: cc@example.com.");
+  });
+
+  it("a message the account sent: expected_to names the original's recipients", async () => {
+    const ok = await reply({ From: "me@example.com", To: "dana@example.com" }, { expected_to: "dana@example.com" }, ["SENT"]);
+    expect(ok.to).toBe("To: dana@example.com");
+    const wrong = await refused({ From: "me@example.com", To: "dana@example.com" }, { expected_to: "me@example.com" }, ["SENT"]);
+    expect(wrong.sent).toBe(false);
+  });
+
+  it("an expected_to with no address in it, or that is not a string, is refused rather than ignored", async () => {
+    const empty = await refused({ From: "sender@example.com" }, { expected_to: "the sender" });
+    expect(empty.sent).toBe(false);
+    expect(empty.error?.message).toMatch(/expected_to holds no email address/);
+    const blank = await refused({ From: "sender@example.com" }, { expected_to: "" });
+    expect(blank.sent).toBe(false);
+    const wrongType = await refused({ From: "sender@example.com" }, { expected_to: ["sender@example.com"] });
+    expect(wrongType.sent).toBe(false);
+  });
+
+  it("a look-alike letter outside ASCII is a different address, not a case variant", async () => {
+    // U+212A, the Kelvin sign, lower-cases to an ASCII "k" under toLowerCase.
+    const r = await refused({ From: "mar\u212A@example.com" }, { expected_to: "mark@example.com" });
+    expect(r.sent).toBe(false);
+    expect(r.error?.message).toContain("Named but not addressed: mark@example.com.");
+  });
+
+  it("without expected_to nothing changes: the reply is sent and the redirect is only reported", async () => {
+    const r = await reply({ From: "boss@example.com", "Reply-To": "support@elsewhere.example" });
+    expect(r.result).toMatchObject({ to: "support@elsewhere.example", reply_to_used: true });
+  });
+});
+
 describe("replyRecipients", () => {
   it("a note the account sent only to itself is still answered to itself under reply all", () => {
     const r = replyRecipients({ from: "me@example.com", to: "me@example.com", selfSent: true }, { replyAll: true, ownAddresses: ["me@example.com"] });
