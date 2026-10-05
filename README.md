@@ -229,7 +229,9 @@ Or add to Claude Desktop MCP config:
 src/
 ├── create-server.ts      # Shared MCP server factory (accepts optional per-session client)
 ├── extension.ts          # Stdio entry point (.mcpb extension, auto-auth on startup)
-├── index.ts              # HTTP entry point (StreamableHTTP, /health + /mcp endpoints)
+├── index.ts              # HTTP entry point (StreamableHTTP, /health + /mcp endpoints, the private file-bytes route)
+├── internal/
+│   └── file-bytes.ts     # Private route for the gateway: the bytes of a file reference (a Gmail message as .eml)
 ├── gws-client.ts         # The client every tool calls; picks the transport by whether it holds a token
 ├── cli-transport.ts      # Fallback: the gws CLI, for self-hosted calls with no token, and the login flow
 ├── scopes.ts             # DEFAULT_SERVICES and the per-service OAuth scopes
@@ -266,6 +268,8 @@ Every tool calls `client.api(service, resource, method, { params, jsonBody })`. 
 The token travels in the `Authorization` header only: never in a URL, a log line or an error. Requests go only to `*.googleapis.com`, redirects are refused, and a resumable upload's session URL is checked against the same rule before anything is sent to it.
 
 **Rate-limit refusals are retried, for reads.** When Google answers a GET with `429`, or with `403` and a rate reason (`rateLimitExceeded`, `userRateLimitExceeded`), the direct transport sends it again: up to three requests per call, exponential backoff with full jitter, at most 8 seconds of added wait, and Google's `Retry-After` honoured (a longer one stops the retry). A refusal that outlasts the attempts surfaces as the same error, with its transient hint. Writes and uploads are never retried, and neither are gateway failures (502, 503, 504) or daily limits. The rule and its reasons are in `src/google-api/rate-limit-retry.ts`.
+
+**A private route hands a file's bytes to the gateway.** `POST /internal/file-bytes` on the HTTP server is not an MCP tool and no model can call it. A gateway that moves a file from one connector to another calls it, with the same `X-User-Token` header `/mcp` receives, so the bytes travel between services instead of through the conversation. It takes a file reference and a byte cap, and answers with the file's bytes and a suggested name in `X-File-Name`. One reference type is supported so far: a Gmail message, returned as its original (`message/rfc822`, an `.eml` file) exactly as Gmail holds it. The size is checked before the message is read and again as it is decoded, nothing is written to disk, and nothing about the message is logged. Failures are JSON with a `code`. The contract is in `src/internal/file-bytes.ts`.
 
 To refresh the method table after Google changes an API: `node scripts/generate-method-table.mjs`, then `pnpm test` (the oracle needs `pnpm run download-binaries`).
 

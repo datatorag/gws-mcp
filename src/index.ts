@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createMcpServer } from "./create-server.js";
 import { GwsClient } from "./gws-client.js";
+import { FILE_BYTES_PATH, serveFileBytes } from "./internal/file-bytes.js";
 
 const PORT = parseInt(process.env.PORT || "39147", 10);
 
@@ -11,6 +12,13 @@ const transports = new Map<string, StreamableHTTPServerTransport>();
 const httpServer = createServer(async (req, res) => {
   if (req.url === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ status: "ok" }));
+    return;
+  }
+
+  // Private to the gateway, not an MCP tool: the bytes of a file reference,
+  // read with the same per-user token /mcp receives (SCRUM-384).
+  if (req.url === FILE_BYTES_PATH) {
+    await serveFileBytes(req, res, (accessToken) => new GwsClient({ accessToken }));
     return;
   }
 

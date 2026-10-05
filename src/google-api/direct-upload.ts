@@ -136,7 +136,21 @@ export async function directUpload(
  * the field out of the stream instead, so only one network chunk is in memory
  * at a time. base64url has no quotes or escapes, which is what makes reading
  * it without a JSON parser sound. */
-export async function* gmailAttachmentBytes(body: AsyncIterable<Uint8Array>): AsyncGenerator<Uint8Array> {
+export function gmailAttachmentBytes(body: AsyncIterable<Uint8Array>): AsyncGenerator<Uint8Array> {
+  return base64urlFieldBytes(body, "data", "No attachment data returned from Gmail API");
+}
+
+/** The same streaming read for any one base64url string field of a JSON
+ * answer: `data` for an attachment, `raw` for a whole message. `field` is
+ * a fixed name chosen by the caller, never input. A caller reading a
+ * document that also carries free text should ask Google for that one field
+ * (`fields`), so no other value can hold the key. */
+export async function* base64urlFieldBytes(
+  body: AsyncIterable<Uint8Array>,
+  field: string,
+  missing: string
+): AsyncGenerator<Uint8Array> {
+  const key = new RegExp(`"${field}"\\s*:\\s*"`);
   const decoder = new TextDecoder();
   let pending = "";
   let inData = false;
@@ -145,7 +159,7 @@ export async function* gmailAttachmentBytes(body: AsyncIterable<Uint8Array>): As
     if (finished) continue;
     pending += decoder.decode(bytes, { stream: true });
     if (!inData) {
-      const m = /"data"\s*:\s*"/.exec(pending);
+      const m = key.exec(pending);
       if (!m) {
         // Keep a tail long enough to hold a key split across two chunks.
         pending = pending.slice(-16);
@@ -164,5 +178,5 @@ export async function* gmailAttachmentBytes(body: AsyncIterable<Uint8Array>): As
       finished = true;
     }
   }
-  if (!inData) throw new Error("No attachment data returned from Gmail API");
+  if (!inData) throw new Error(missing);
 }
