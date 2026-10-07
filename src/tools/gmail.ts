@@ -251,7 +251,7 @@ export const gmailTools: ToolDef[] = [
         text_only: {
           type: "boolean",
           description:
-            "Return a compact view instead of the raw MIME payload: flattened from/to/cc/subject/date headers, the decoded text/plain body (falls back to tag-stripped text/html), and attachment metadata (filename, mimeType, attachmentId). Recommended for triage — avoids base64 attachment data overflowing the response.",
+            "Return a compact view instead of the raw MIME payload: flattened from/to/cc/subject/date headers, the decoded text/plain body (falls back to tag-stripped text/html), and attachment metadata (partId, filename, mimeType, attachmentId). Recommended for triage: it avoids base64 attachment data overflowing the response.",
         },
         max_body_chars: {
           type: "number",
@@ -579,6 +579,7 @@ export const gmailTools: ToolDef[] = [
 ];
 
 interface GmailPart {
+  partId?: string;
   mimeType?: string;
   filename?: string;
   headers?: { name: string; value: string }[];
@@ -664,6 +665,7 @@ function extractTextBody(payload: GmailPart | undefined): string {
 function listAttachments(
   part: GmailPart | undefined,
   out: {
+    partId?: string;
     filename?: string;
     mimeType?: string;
     attachmentId: string;
@@ -672,6 +674,9 @@ function listAttachments(
 ) {
   if (part?.body?.attachmentId) {
     out.push({
+      // The part's place in the message. It is the same on every read, where
+      // the attachmentId is issued new each time.
+      partId: part.partId,
       filename: part.filename,
       mimeType: part.mimeType,
       attachmentId: part.body.attachmentId,
