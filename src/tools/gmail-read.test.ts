@@ -116,3 +116,36 @@ describe("gmail_save_attachment_to_drive", () => {
     expect((calls[0].transfer as { parent?: string }).parent).toBeUndefined();
   });
 });
+
+/* SCRUM-395: the part id is what a file reference names an attachment by.
+ * Gmail issues a new attachmentId on every read; the partId stays put. */
+describe("gmail_read lists each attachment with its part id", () => {
+  it("carries the partId of every part that has an attachment, however deep", async () => {
+    const { client } = fakeClient([
+      {
+        data: {
+          id: "m1",
+          payload: {
+            partId: "",
+            mimeType: "multipart/mixed",
+            headers: [{ name: "Subject", value: "hi" }],
+            parts: [
+              { partId: "0", mimeType: "text/plain", body: { data: Buffer.from("see attached", "utf8").toString("base64url") } },
+              {
+                partId: "1",
+                mimeType: "multipart/mixed",
+                parts: [{ partId: "1.0", mimeType: "application/pdf", filename: "q3.pdf", body: { attachmentId: "a1", size: 10 } }],
+              },
+              { partId: "2", mimeType: "image/png", filename: "chart.png", body: { attachmentId: "a2", size: 20 } },
+            ],
+          },
+        },
+      },
+    ]);
+    const res = await handleGmail(client, "gmail_read", { message_id: "m1", text_only: true });
+    expect(payload(res).attachments).toEqual([
+      { partId: "1.0", filename: "q3.pdf", mimeType: "application/pdf", attachmentId: "a1", size: 10 },
+      { partId: "2", filename: "chart.png", mimeType: "image/png", attachmentId: "a2", size: 20 },
+    ]);
+  });
+});
