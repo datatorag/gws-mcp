@@ -186,7 +186,7 @@ export const sheetsTools: ToolDef[] = [
   {
     name: "sheets_update",
     description:
-      "Update specific cells in a Google Sheets spreadsheet. Overwrites existing values in the specified range.",
+      "Update specific cells in a Google Sheets spreadsheet. Overwrites existing values in the specified range. Numeric-looking text is typed the way the Sheets UI types it: '007' is stored as the number 7 and comes back as 7. To keep such a value as text, pass value_input_option RAW for the call, or put a leading apostrophe on that one value.",
     inputSchema: {
       type: "object",
       properties: {
@@ -218,7 +218,7 @@ export const sheetsTools: ToolDef[] = [
   {
     name: "sheets_append",
     description:
-      "Append rows to the end of a Google Sheets spreadsheet.",
+      "Append rows to the end of a Google Sheets spreadsheet. Numeric-looking text is typed the way the Sheets UI types it: '007' is stored as the number 7 and comes back as 7. To keep such a value as text, pass value_input_option RAW for the call, or put a leading apostrophe on that one value.",
     inputSchema: {
       type: "object",
       properties: {
