@@ -1,5 +1,12 @@
 # Google Workspace MCP Server
 
+> **This repository has moved and is archived.** The code now lives in
+> [`datatorag/mcp-gateway`](https://github.com/datatorag/mcp-gateway) under
+> [`plugins/gws-mcp`](https://github.com/datatorag/mcp-gateway/tree/main/plugins/gws-mcp),
+> with its history. Issues and pull requests go there. Nothing here is
+> updated any more, and what follows describes this repository as it was
+> when it was frozen.
+
 A [Model Context Protocol](https://modelcontextprotocol.io/) server that gives Claude access to Google Workspace — Gmail, Calendar, Drive, Contacts, Sheets, Docs, Slides, Tasks, and 100+ APIs via the [gws CLI](https://github.com/googleworkspace/cli).
 
 This server powers the Google Workspace connector of [DataToRAG](https://datatorag.com), a hosted MCP gateway with per-user OAuth, multi-account support, and Atlassian tools alongside these — add `https://datatorag.com/mcp` to your MCP client and skip the setup below. Or run this server yourself, standalone or as a Claude Desktop extension.
